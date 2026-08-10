@@ -934,15 +934,18 @@ export default function WebPreviewPanel({ sessionKey, active = true }: { session
             <div className="text-[11px] text-muted max-w-[320px] leading-snug">
               {i18nT('components.webPreviewPanel.this_dashboard_is_served_over_https_so_the_brows')}
               <span className="font-mono"> {i18nT('components.webPreviewPanel.http')} </span>
-              {i18nT('components.webPreviewPanel.page_mixed_content_open_it_in_a_new_tab_instead')}
+              {i18nT('components.webPreviewPanel.page_mixed_content')}
             </div>
+            <code className="text-[11px] font-mono px-2 py-1 rounded bg-bg-elevated text-text break-all max-w-[320px]">
+              {url}
+            </code>
             <a
               href={url}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-md border border-border text-text hover:bg-bg-hover transition-colors no-underline"
             >
-              <ExternalLink size={13} /> {i18nT('components.webPreviewPanel.open')} {url}
+              <ExternalLink size={13} /> {i18nT('components.webPreviewPanel.open_in_browser')}
             </a>
           </div>
         ) : selfOrigin ? (

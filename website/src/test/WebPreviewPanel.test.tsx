@@ -258,6 +258,25 @@ describe('WebPreviewPanel', () => {
     expect(screen.getByText('Open in browser')).toBeInTheDocument()
   })
 
+  it('shows a mixed-content URL separately from the consistent browser action', () => {
+    const originalHref = window.location.href
+    window.location.href = 'https://dashboard.example.com/'
+    try {
+      renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
+      const input = screen.getByLabelText('Preview URL')
+      fireEvent.change(input, { target: { value: 'http://localhost:5173/very/long/path' } })
+      fireEvent.submit(input.closest('form') as HTMLFormElement)
+
+      const shown = 'http://localhost:5173/very/long/path'
+      expect(screen.getByText("Can't embed an http:// page here")).toBeInTheDocument()
+      expect(screen.getByText(shown).tagName).toBe('CODE')
+      expect(screen.getByText('Open in browser').closest('a')).toHaveAttribute('href', shown)
+      expect(screen.queryByText(`Open ${shown}`)).toBeNull()
+    } finally {
+      window.location.href = originalHref
+    }
+  })
+
   it('still frames an ordinary dev server on another port', () => {
     // Guards the port comparison: only the gateway's own port is refused.
     renderWithProviders(<WebPreviewPanel sessionKey="sess-1" />)
