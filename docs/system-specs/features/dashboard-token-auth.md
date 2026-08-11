@@ -271,6 +271,12 @@ Up to `MAX_CONCURRENT_NONCES` (**50**) link nonces are valid simultaneously. Whe
 
 The in-memory `TokenStateManager` (link nonces, IP bindings, consumed set) is cleared on restart, but this does **not** log users out: an established session cookie is validated on the cookie path (`use_session_exp=True`), which needs only a valid HMAC signature (persistent key) + unexpired `session_exp` + a current revocation generation + a nonce not on the persisted denylist — it never consults the in-memory link-nonce set. Revoked-session state is durable: `RevokedNonceStore` persists to `token_revoked_nonces.json` (mode `0600`) and the revocation generation persists to `token_revocation.gen`, so a logged-out cookie stays dead across restarts while a restart alone (generation reloaded unchanged) logs nobody out. Users can revoke a single session via `POST /api/auth/logout` (`revoke_access_cookie()`) or all sessions — access cookies and refresh chains — via `kirocrew logout` (`revoke_all_sessions()`, which bumps the generation both token kinds embed and check).
 
+If `token_revocation.gen` exists but cannot be read as an integer, both token
+validators fail closed until the state is repaired. The gateway warning names
+the exact file and advises deleting only that file to reset revocation state;
+the warning also states the security consequence: resetting the counter can
+re-enable unexpired sessions previously revoked by `kirocrew logout`.
+
 #### App-token scope confinement (CWE-269)
 
 An **app token** (payload carries a non-empty `app` claim, minted by the `X-App-Secret` exchange at `POST /api/apps/<name>/token`) must not have the same reach as a dashboard-user token. `_enforce_app_scope(request, app_name, path)` applies least privilege, **deny-by-default**:
