@@ -454,6 +454,17 @@ export default function MdNotebookPage() {
   const [lastSyncByVault, setLastSyncByVault] = useState<Record<string, number>>({})
 
   const saveTimer = useRef<number | null>(null)
+  /**
+   * Requests the unmount flush must wait for before it writes.
+   *
+   * Not just saves. The flush targets `pathRef`, so anything that RETARGETS
+   * `pathRef` has to finish first: between a move's request and its reply the
+   * open note's path names a file the server has already moved away, and a write
+   * sent there is lost to a swallowed `ESTALE`. Entries are registered through
+   * their retarget, not merely around the request, because it is the retarget --
+   * not the response -- that makes the wait sufficient.
+   */
+  const writesInFlightRef = useRef(new Set<Promise<void>>())
   const contentRef = useRef('')
   const pathRef = useRef<string | null>(null)
   const vaultRef = useRef(activeVaultId)
@@ -476,6 +487,21 @@ export default function MdNotebookPage() {
     () => targetsSameNote(deletingRef.current, vaultRef.current, pathRef.current),
     [],
   )
+  /**
+   * Register a request the unmount flush must wait for; the returned function
+   * releases it. Callers hold it across the retarget, not just the request.
+   */
+  const trackWrite = useCallback(() => {
+    let release!: () => void
+    const entry = new Promise<void>(resolve => {
+      release = resolve
+    })
+    writesInFlightRef.current.add(entry)
+    return () => {
+      release()
+      writesInFlightRef.current.delete(entry)
+    }
+  }, [])
   useEffect(() => {
     dirtyRef.current = dirty
   }, [dirty])
@@ -493,6 +519,90 @@ export default function MdNotebookPage() {
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [])
+
+  // A pending edit is SENT on unmount, not cancelled. In-app navigation tears
+  // this page down without firing `beforeunload`, so inside the debounce window
+  // that timer is the only thing that would ever have persisted what the user
+  // just typed — cancelling it would trade a leaked timer for silent data loss.
+  // Same call the `minsTimer` teardown above makes for the auto-sync interval,
+  // for the same reason.
+  useEffect(
+    () => () => {
+      // `dirtyRef` is part of the gate, not just the write below. A save that
+      // FAILED clears the debounce on entry and releases its tracking on the way
+      // out, yet leaves the buffer dirty and re-arms nothing — only a keystroke
+      // arms the debounce. Gating on the timer and the tracked set alone would
+      // send that edit nowhere on the next navigation, which is the loss this
+      // effect exists to prevent.
+      if (!saveTimer.current && !writesInFlightRef.current.size && !dirtyRef.current) return
+
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+
+      // Wait for the tracked requests before writing, for two different reasons.
+      // An autosave may already be retrying newer buffer snapshots, so the write
+      // needs the mtime that save produced: sending alongside its last attempt
+      // would carry a superseded mtime, come back ESTALE, and lose the edit — the
+      // exact outcome this effect exists to prevent. A move has to finish for an
+      // unrelated reason: it is what retargets `pathRef` onto the note's new
+      // path, and writing before that lands sends the edit to the path the move
+      // is vacating.
+      //
+      // The wait is bounded by the requests it waits on and holds no timer,
+      // listener or interval, only a promise closure, so unlike the debounce
+      // cancelled above it cannot run component logic at an arbitrary later time.
+      //
+      // `flushSave` is deliberately NOT reused here, and not because of its state
+      // setters — React 18 makes a post-unmount setState a silent no-op. The
+      // reason is that it reads LIVE refs: its retry loop re-reads
+      // `contentRef.current` on every attempt, and after unmount a move's own
+      // continuation reopens the note at its new path and repoints `contentRef`
+      // at DISK content. Reusing it would let that loop send the disk bytes back
+      // and clear the dirty flag against them, dropping the edit this effect
+      // exists to save. It also mutates `mtimeRef` and `saveTimer`, which a
+      // still-running `relocate` reads after this component is gone.
+      const activeWrites = [...writesInFlightRef.current]
+      // The buffer is snapshotted HERE, before the wait. No keystroke can arrive
+      // after unmount, and a request settling during the wait can repoint
+      // `contentRef` at disk content — a move reopens the note at its new path —
+      // which would write the file back unchanged and drop the edit.
+      const pendingContent = contentRef.current
+      const saveDirtySnapshot = async () => {
+        const vault = vaultRef.current
+        // The path is read AFTER the wait, so a completed move contributes its
+        // NEW path. `dirtyRef` is read live for the same reason: an in-flight
+        // save that succeeded during the wait already persisted this buffer.
+        const path = pathRef.current
+        // Read the delete state AFTER the wait above, because a delete can be
+        // confirmed while that save is still in flight.
+        //
+        // This is DEFENSE IN DEPTH, not a live hazard: reaching it needs a dirty
+        // buffer whose own note has a DELETE in flight, and three separate
+        // invariants currently make that state unreachable. `removeNote` flushes
+        // a pending edit and returns if it is still dirty BEFORE it arms
+        // `deletingRef`, and `edit` and `markDirty` — the only two sites that set
+        // the flag — both refuse while `openNoteIsDeleting()`. The check is here
+        // anyway because this write bypasses `flushSave`, and with it the ESTALE
+        // branch that recognises the backend's refusal to resurrect a deleted
+        // note; the callers below swallow that rejection, so without this the
+        // teardown write's safety would rest entirely on three invariants held
+        // in two other functions. Keeping it local means a later change to
+        // `removeNote`'s flush ordering cannot quietly turn this into a recreate.
+        if (targetsSameNote(deletingRef.current, vault, path)) return
+        if (vault && path && dirtyRef.current) {
+          await notesApi.saveNote(vault, path, pendingContent, mtimeRef.current ?? undefined)
+        }
+      }
+      if (activeWrites.length) {
+        void Promise.all(activeWrites).then(saveDirtySnapshot).catch(() => undefined)
+      } else {
+        void saveDirtySnapshot().catch(() => undefined)
+      }
+    },
+    [],
+  )
 
   // Re-render every 30s so the "5m ago" label ages without interaction.
   const [, setTick] = useState(0)
@@ -632,6 +742,7 @@ export default function MdNotebookPage() {
     // and the banner offers "Use the file on disk" against the NEW vault's buffer.
     const savingPath = pathRef.current
     const saving = { vault: vaultRef.current, path: savingPath }
+    const doneSave = trackWrite()
     try {
       // Save until what landed matches what the editor holds. `contentRef` can
       // move while the request is in flight, and the debounce timer was
@@ -677,8 +788,10 @@ export default function MdNotebookPage() {
       } else {
         setError(e instanceof Error ? e.message : String(e))
       }
+    } finally {
+      doneSave()
     }
-  }, [])
+  }, [trackWrite])
 
   const openNote = useCallback(async (path: string) => {
     if (!vaultRef.current) return
@@ -996,13 +1109,23 @@ export default function MdNotebookPage() {
         // now would retarget it to `to` without ever reconciling that content,
         // so a later save could overwrite the moved file from a stale base.
         if (pathRef.current === from && dirtyRef.current) return
-        await notesApi.moveNote(vault, from, to)
-        repointPin(vault, from, to)
-        if (vaultRef.current !== vault) return
-        if (pathRef.current === from) {
-          pathRef.current = to
-          setActivePath(to)
-          savePref(LS.openNote, to)
+        // Tracked THROUGH the retarget below, not just around the request. The
+        // unmount flush writes against `pathRef`, and until that assignment lands
+        // `pathRef` still names the path this move is vacating -- a flush that ran
+        // in the gap would send the edit to a file the server has already moved,
+        // and the swallowed ESTALE would lose it.
+        const doneMove = trackWrite()
+        try {
+          await notesApi.moveNote(vault, from, to)
+          repointPin(vault, from, to)
+          if (vaultRef.current !== vault) return
+          if (pathRef.current === from) {
+            pathRef.current = to
+            setActivePath(to)
+            savePref(LS.openNote, to)
+          }
+        } finally {
+          doneMove()
         }
         await loadNotes()
         if (pathRef.current === to) await openNote(to)
@@ -1010,7 +1133,7 @@ export default function MdNotebookPage() {
         setError(e instanceof Error ? e.message : String(e))
       }
     },
-    [flushSave, loadNotes, openNote, repointPin],
+    [flushSave, loadNotes, openNote, repointPin, trackWrite],
   )
 
   /** File a note into `folder` ('' = vault root), keeping its filename. */
