@@ -57,6 +57,11 @@ a component under test talks to a realistic API without a gateway running.
 When a test fails with an unhandled request, the fix is almost always a missing
 handler rather than a change to the component: add the endpoint to the mock server.
 
+Mocks for `URL.createObjectURL()` that feed an iframe must return a well-formed
+`blob:<origin>/<id>` URL rooted at the configured happy-dom origin. Short forms
+such as `blob:test` can be reinterpreted during deferred iframe cleanup and escape
+the MSW boundary after the test file has finished.
+
 ## Playwright: how it actually runs
 
 The config is `playwright.config.ts`, and several of its choices surprise people:

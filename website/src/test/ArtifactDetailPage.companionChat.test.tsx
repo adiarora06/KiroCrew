@@ -95,7 +95,7 @@ describe('ArtifactDetailPage companion chat', () => {
     sessionStorage.clear()
     if (!URL.createObjectURL) {
       // @ts-expect-error stub
-      URL.createObjectURL = vi.fn().mockReturnValue('blob:test')
+      URL.createObjectURL = vi.fn().mockReturnValue('blob:http://localhost:6776/artifact-detail-companion-chat')
       // @ts-expect-error stub
       URL.revokeObjectURL = vi.fn()
     }

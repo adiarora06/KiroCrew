@@ -66,7 +66,7 @@ describe('ArtifactDetailPage', () => {
     vi.clearAllMocks()
     // Spy rather than assign: only a spy lands in the registry that
     // vi.restoreAllMocks() can undo. The env provides both natively.
-    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:http://localhost:6776/artifact-detail-test')
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     // Default events response so the events query never throws "undefined".
     // Individual tests can override this with .mockResolvedValueOnce when

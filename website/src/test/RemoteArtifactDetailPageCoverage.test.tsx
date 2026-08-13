@@ -166,7 +166,7 @@ describe('RemoteArtifactDetailPage', () => {
     vi.clearAllMocks()
     // happy-dom has no object-URL support, which the HTML render path needs.
     // @ts-expect-error assigning a test stub onto the URL global
-    globalThis.URL.createObjectURL = vi.fn().mockReturnValue('blob:remote-test')
+    globalThis.URL.createObjectURL = vi.fn().mockReturnValue('blob:http://localhost:6776/remote-artifact-detail-test')
     // @ts-expect-error assigning a test stub onto the URL global
     globalThis.URL.revokeObjectURL = vi.fn()
     // clearAllMocks resets call history only, so re-establish the defaults every
@@ -264,7 +264,7 @@ describe('RemoteArtifactDetailPage', () => {
       )
       renderPage()
       const frame = await screen.findByTitle(`Remote artifact: ${EXT_ID}`)
-      expect(frame).toHaveAttribute('src', 'blob:remote-test')
+      expect(frame).toHaveAttribute('src', 'blob:http://localhost:6776/remote-artifact-detail-test')
       expect(frame).toHaveAttribute('sandbox', expect.stringContaining('allow-scripts'))
       expect(URL.createObjectURL).toHaveBeenCalled()
     })

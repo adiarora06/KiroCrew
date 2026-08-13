@@ -9,6 +9,8 @@ import { effectiveWidgetSlug } from '../lib/widgetSlug'
 import { i18nT } from '../i18n/t'
 import { TAILWIND_COMPLEXITY_THRESHOLD } from '../lib/widgetComplexity'
 
+const WIDGET_BLOB_URL = 'blob:http://localhost:6776/widget-frame-test'
+
 // WidgetFrame consumes useTheme(), which requires a ThemeProvider, and now
 // useQuery, which requires a QueryClient. Wrap every render here to mirror the
 // production setup (main.tsx wraps App in both).
@@ -61,7 +63,7 @@ beforeEach(() => {
       }
     }
   } as typeof Blob
-  vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test-widget')
+  vi.spyOn(URL, 'createObjectURL').mockReturnValue(WIDGET_BLOB_URL)
   vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
 
   // Jest-dom inherits the real CSSOM, so spy on getComputedStyle to inject a
@@ -166,6 +168,14 @@ describe('WidgetFrame theme passthrough', () => {
     const iframe = container.querySelector('iframe')!
     expect(iframe.className).toMatch(/\bbg-card\b/)
     expect(iframe.className).not.toMatch(/\bbg-white\b/)
+  })
+
+  it('uses a well-formed blob URL rooted at the test document origin', () => {
+    const { container } = wrap(<WidgetFrame html="<p>hi</p>" title="T" />)
+    const iframe = container.querySelector('iframe')!
+
+    expect(iframe.src).toBe(WIDGET_BLOB_URL)
+    expect(new URL(iframe.src).origin).toBe(window.location.origin)
   })
 
   it('preserves the CSP meta and loads the Tailwind runtime same-origin', () => {
@@ -285,7 +295,7 @@ describe('WidgetFrame openInNewTab', () => {
       if (typeof parts[0] === 'string') wrapper = parts[0] as string
       return new realBlob(parts, opts)
     })
-    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue(WIDGET_BLOB_URL)
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     vi.spyOn(window, 'open').mockReturnValue(null)
 
@@ -304,7 +314,7 @@ describe('WidgetFrame openInNewTab', () => {
       mimeType = opts?.type ?? ''
       return new realBlob(args[0] as BlobPart[], opts)
     })
-    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue(WIDGET_BLOB_URL)
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     vi.spyOn(window, 'open').mockReturnValue(null)
 

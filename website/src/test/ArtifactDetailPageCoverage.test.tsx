@@ -178,7 +178,7 @@ describe('ArtifactDetailPage — mutation paths', () => {
     sessionStorage.clear()
     if (!URL.createObjectURL) {
       // @ts-expect-error jsdom lacks blob URLs
-      URL.createObjectURL = vi.fn().mockReturnValue('blob:test')
+      URL.createObjectURL = vi.fn().mockReturnValue('blob:http://localhost:6776/artifact-detail-coverage')
       // @ts-expect-error jsdom lacks blob URLs
       URL.revokeObjectURL = vi.fn()
     }

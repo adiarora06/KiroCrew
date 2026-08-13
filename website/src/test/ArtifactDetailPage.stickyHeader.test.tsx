@@ -39,7 +39,7 @@ function renderRoute() {
 describe('ArtifactDetailPage — sticky header', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:test')
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:http://localhost:6776/artifact-detail-sticky-header')
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     vi.mocked(api).artifactEvents = vi.fn().mockResolvedValue({ slug: 'cr-queue', events: [] })
     vi.mocked(api).artifactComments = vi.fn().mockResolvedValue({ comments: [] })
