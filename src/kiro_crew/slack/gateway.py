@@ -351,6 +351,11 @@ _MAX_INJECT_ATTEMPTS = 2
 # _JOB_TIMEOUT_SECS: no human is present, so the turn MUST be bounded.
 _NUDGE_TURN_TIMEOUT = 1800.0  # 30 min
 
+# Budget for awaiting the in-flight run-marker write during shutdown. Bounded
+# so a stalled write can never eat into GRACEFUL_SHUTDOWN_SECS (which saves
+# active slots) — the marker is best-effort, the slot save is not.
+_MARKER_WRITE_WAIT_SECS = 5.0
+
 # Approval sources that run UNATTENDED (no human responder). These deny-fast on a
 # short window instead of burning the full 2h human-approval window. Subagent
 # approvals are NOT background: they route to the dashboard where the spawning
@@ -1096,6 +1101,11 @@ class GatewayOrchestrator:
         self.channel_history: ChannelHistory | None = None
         self.dashboard_state: DashboardState | None = None
         self._background_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
+        self._marker_write_task: "asyncio.Task[None] | None" = None
+        # Set by the shutdown path when the marker write is still in flight:
+        # tells the writer thread to self-clear after publishing, closing the
+        # write-after-clear race without any event-loop dependency.
+        self._marker_clear_pending = threading.Event()
         self._dashboard_runner: web.AppRunner | None = None
         self._handler_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
         self._session_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
@@ -7297,6 +7307,28 @@ class GatewayOrchestrator:
             )
             return False
 
+    def _write_marker_worker(self, run_marker: Any, port: int) -> None:
+        """Write the run marker; self-clear if shutdown flagged a clear.
+
+        ``run_marker`` is the :mod:`kiro_crew.instances.run_marker` module,
+        passed in by ``run()`` (which already imports it lazily) so this
+        worker adds no import of its own. Runs on a ``to_thread`` worker.
+        If graceful shutdown timed out waiting for this write, it sets
+        ``_marker_clear_pending`` BEFORE clearing the marker itself — so
+        whichever order the write and the shutdown-side clear land in, this
+        thread re-clears its own late write. The clear lives in the same
+        thread as the write (not an event-loop callback) because
+        ``os._exit`` can beat any callback still queued on the loop.
+        """
+        try:
+            run_marker.write_marker(port)
+        finally:
+            if self._marker_clear_pending.is_set():
+                try:
+                    run_marker.clear_marker(port)
+                except Exception:
+                    logger.debug("Late run-marker self-clear skipped", exc_info=True)
+
     async def run(self) -> None:
         """Start all services and block until shutdown signal."""
         # ── Crash guard (D1/D2 of Lorikeets-3929) ──
@@ -7426,8 +7458,11 @@ class GatewayOrchestrator:
 
             if self._dashboard_port:
                 _marker_task = asyncio.create_task(
-                    asyncio.to_thread(run_marker.write_marker, self._dashboard_port)
+                    asyncio.to_thread(
+                        self._write_marker_worker, run_marker, self._dashboard_port
+                    )
                 )
+                self._marker_write_task = _marker_task
                 self._background_tasks.add(_marker_task)
                 _marker_task.add_done_callback(self._background_tasks.discard)
         except Exception:
@@ -7644,14 +7679,44 @@ class GatewayOrchestrator:
         await shutdown_event.wait()
         print("👻 Shutting down…")
 
-        # Drop this gateway's run-marker so a mint never execs a launcher for a
-        # port we no longer serve (best-effort; a stale marker is harmless — the
-        # next startup overwrites it, and mint would just fail to reach the down
-        # dashboard exactly as it does today).
+        # Drop this gateway's run-marker BEFORE _shutdown() releases the
+        # listener: once the port is free a replacement gateway can bind it
+        # and publish its own marker + credential, which this clear would
+        # then delete (clear_marker is unconditional — consumers verify
+        # ownership on read, but deleting the successor's credential 403s
+        # its clients). The clear itself is best-effort; a stale marker is
+        # harmless — the next startup overwrites it. The wait for the
+        # in-flight write is bounded so a stalled write cannot eat into the
+        # graceful-shutdown deadline below (which saves active slots). On
+        # timeout the detached writer thread may still republish the marker
+        # after the clear, so _marker_clear_pending is set FIRST: the
+        # writer thread (see _write_marker_worker) then re-clears its own
+        # late write in the same thread, with no event-loop callback that
+        # os._exit could beat. TimeoutError and a failed write are both
+        # caught HERE (not by the outer except) so they still fall through
+        # to the clear.
         try:
             from kiro_crew.instances import run_marker
 
-            if not self._no_dashboard and self._dashboard_port:
+            if self._dashboard_port:
+                if self._marker_write_task is not None:
+                    try:
+                        await asyncio.wait_for(
+                            self._marker_write_task,
+                            timeout=_MARKER_WRITE_WAIT_SECS,
+                        )
+                    except asyncio.TimeoutError:
+                        self._marker_clear_pending.set()
+                        logger.warning(
+                            "Run-marker write did not finish within %ss; "
+                            "clearing marker without waiting",
+                            _MARKER_WRITE_WAIT_SECS,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Run-marker write failed; clearing anyway",
+                            exc_info=True,
+                        )
                 run_marker.clear_marker(self._dashboard_port)
         except Exception:
             logger.debug("Gateway run-marker clear skipped", exc_info=True)

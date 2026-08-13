@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -2456,11 +2457,37 @@ class TestRunMethod:
         orch._shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_run_no_dashboard_uses_api_server(self):
-        """--no-dashboard uses _init_api_server."""
+    async def test_run_no_dashboard_uses_api_server(self, tmp_path, monkeypatch):
+        """--no-dashboard waits for and then clears its run marker."""
         import kiro_crew
+        from kiro_crew.instances import run_marker
 
         orch = _make_orchestrator(no_dashboard=True)
+        orch._dashboard_port = 5476
+
+        monkeypatch.setattr(run_marker, "config_dir", lambda: tmp_path)
+        run_marker.write_marker(orch._dashboard_port)
+        original_write_marker = run_marker.write_marker
+        events = []
+
+        def slow_write_marker(port):
+            events.append("write-start")
+            time.sleep(0.05)
+            original_write_marker(port)
+            events.append("write-end")
+
+        original_clear_marker = run_marker.clear_marker
+
+        def recording_clear_marker(port):
+            events.append("clear")
+            original_clear_marker(port)
+
+        monkeypatch.setattr(run_marker, "write_marker", slow_write_marker)
+        monkeypatch.setattr(run_marker, "clear_marker", recording_clear_marker)
+        marker = run_marker.marker_path(orch._dashboard_port)
+        pid_marker = run_marker.pid_path(orch._dashboard_port)
+        assert marker.exists()
+        assert pid_marker.exists()
 
         orch._init_services = AsyncMock()
         orch._start_embeddings = AsyncMock()
@@ -2487,9 +2514,14 @@ class TestRunMethod:
                     with patch("kiro_crew.slack.interactions.init"):
                         with patch("kiro_crew.slack.events.SeenCache"):
                             with patch("kiro_crew.session.cleanup_orphaned_sessions"):
-                                with patch("kiro_crew.dashboard.handlers._bg_mcp_probe", new_callable=AsyncMock):
+                                with patch(
+                                    "kiro_crew.dashboard.handlers._bg_mcp_probe",
+                                    new_callable=AsyncMock,
+                                ):
                                     with patch("os._exit"):
-                                        with patch("resource.getrlimit", return_value=(256, 10240)):
+                                        with patch(
+                                            "resource.getrlimit", return_value=(256, 10240)
+                                        ):
                                             with patch("resource.setrlimit"):
                                                 await orch.run()
         finally:
@@ -2497,6 +2529,173 @@ class TestRunMethod:
 
         orch._init_dashboard.assert_not_awaited()
         orch._init_api_server.assert_awaited_once()
+        assert events == ["write-start", "write-end", "clear"]
+        assert not marker.exists()
+        assert not pid_marker.exists()
+
+    @pytest.mark.asyncio
+    async def test_run_stalled_marker_write_does_not_block_shutdown(
+        self, tmp_path, monkeypatch
+    ):
+        """A hung marker write times out; the marker is cleared and _shutdown runs.
+
+        Regression: an unbounded ``await self._marker_write_task`` sat before
+        the bounded ``_shutdown()`` call, so a stalled write consumed the
+        graceful-shutdown deadline and active slots were SIGKILLed unsaved.
+        """
+        import kiro_crew
+        from kiro_crew.instances import run_marker
+        from kiro_crew.slack import gateway as gateway_mod
+
+        orch = _make_orchestrator(no_dashboard=True)
+        orch._dashboard_port = 5477
+
+        monkeypatch.setattr(run_marker, "config_dir", lambda: tmp_path)
+        run_marker.write_marker(orch._dashboard_port)
+        # Shrink the wait budget so the timeout path runs fast in tests.
+        monkeypatch.setattr(gateway_mod, "_MARKER_WRITE_WAIT_SECS", 0.05)
+
+        events = []
+        stall = threading.Event()
+        original_write_marker = run_marker.write_marker
+        original_clear_marker = run_marker.clear_marker
+
+        def stalled_write_marker(port):
+            events.append("write-start")
+            stall.wait(5.0)  # far longer than the shrunk 0.05s budget
+            original_write_marker(port)  # late write republishes the marker
+            events.append("write-end")
+
+        def recording_clear_marker(port):
+            events.append("clear")
+            original_clear_marker(port)
+
+        monkeypatch.setattr(run_marker, "write_marker", stalled_write_marker)
+        monkeypatch.setattr(run_marker, "clear_marker", recording_clear_marker)
+        marker = run_marker.marker_path(orch._dashboard_port)
+        pid_marker = run_marker.pid_path(orch._dashboard_port)
+        assert marker.exists()
+
+        orch._init_services = AsyncMock()
+        orch._start_embeddings = AsyncMock()
+        orch._auto_migrate_memory = AsyncMock()
+        orch._init_cron = AsyncMock()
+        orch._init_heartbeat = AsyncMock()
+        orch._init_mcp_discovery = MagicMock()
+        orch._init_subagents = MagicMock()
+        orch._init_task_runner = MagicMock()
+        orch._init_dashboard = AsyncMock()
+        orch._init_api_server = AsyncMock()
+        orch._init_autonudge = AsyncMock()
+        orch._check_for_updates = AsyncMock()
+        orch._shutdown = AsyncMock()
+
+        kiro_crew.shutdown_event.set()
+        loop = asyncio.get_running_loop()
+        try:
+            with patch.object(loop, "add_signal_handler"):
+                with patch("kiro_crew.slack.events.init_socket_mode"):
+                    with patch("kiro_crew.slack.interactions.init"):
+                        with patch("kiro_crew.slack.events.SeenCache"):
+                            with patch("kiro_crew.session.cleanup_orphaned_sessions"):
+                                with patch(
+                                    "kiro_crew.dashboard.handlers._bg_mcp_probe",
+                                    new_callable=AsyncMock,
+                                ):
+                                    with patch("os._exit"):
+                                        with patch(
+                                            "resource.getrlimit", return_value=(256, 10240)
+                                        ):
+                                            with patch("resource.setrlimit"):
+                                                await orch.run()
+        finally:
+            kiro_crew.shutdown_event.clear()
+            # Release AND drain the stalled writer inside this finally: if an
+            # assertion below failed with the worker still parked, monkeypatch
+            # teardown would restore the real config_dir/write_marker and the
+            # worker would wake later and write markers OUTSIDE tmp_path.
+            stall.set()
+            for _ in range(200):  # up to ~10s; normally a few ms
+                if "write-start" not in events or events.count("clear") >= 2:
+                    break
+                await asyncio.sleep(0.05)
+
+        # The stalled write did not complete before the bounded wait expired,
+        # yet the marker was cleared and graceful shutdown still ran — the
+        # timeout kept the deadline intact.
+        assert events[:2] == ["write-start", "clear"]
+        orch._shutdown.assert_awaited_once()
+
+        # The released writer republished the marker files after the
+        # timed-out clear. The writer thread must then self-clear them
+        # (same thread, no event-loop callback os._exit could beat),
+        # otherwise a stopped gateway leaves stale runtime state behind.
+        assert "write-end" in events
+        assert events.index("write-end") > events.index("clear")
+        assert events.count("clear") == 2  # timed-out clear + writer self-clear
+        assert not marker.exists()
+        assert not pid_marker.exists()
+
+    @pytest.mark.asyncio
+    async def test_run_failed_marker_write_still_clears(self, tmp_path, monkeypatch):
+        """A marker write that raises must not skip the shutdown clear."""
+        import kiro_crew
+        from kiro_crew.instances import run_marker
+
+        orch = _make_orchestrator(no_dashboard=True)
+        orch._dashboard_port = 5478
+
+        monkeypatch.setattr(run_marker, "config_dir", lambda: tmp_path)
+        run_marker.write_marker(orch._dashboard_port)  # pre-existing marker
+
+        def failing_write_marker(port):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(run_marker, "write_marker", failing_write_marker)
+        marker = run_marker.marker_path(orch._dashboard_port)
+        pid_marker = run_marker.pid_path(orch._dashboard_port)
+        assert marker.exists()
+
+        orch._init_services = AsyncMock()
+        orch._start_embeddings = AsyncMock()
+        orch._auto_migrate_memory = AsyncMock()
+        orch._init_cron = AsyncMock()
+        orch._init_heartbeat = AsyncMock()
+        orch._init_mcp_discovery = MagicMock()
+        orch._init_subagents = MagicMock()
+        orch._init_task_runner = MagicMock()
+        orch._init_dashboard = AsyncMock()
+        orch._init_api_server = AsyncMock()
+        orch._init_autonudge = AsyncMock()
+        orch._check_for_updates = AsyncMock()
+        orch._shutdown = AsyncMock()
+
+        kiro_crew.shutdown_event.set()
+        loop = asyncio.get_running_loop()
+        try:
+            with patch.object(loop, "add_signal_handler"):
+                with patch("kiro_crew.slack.events.init_socket_mode"):
+                    with patch("kiro_crew.slack.interactions.init"):
+                        with patch("kiro_crew.slack.events.SeenCache"):
+                            with patch("kiro_crew.session.cleanup_orphaned_sessions"):
+                                with patch(
+                                    "kiro_crew.dashboard.handlers._bg_mcp_probe",
+                                    new_callable=AsyncMock,
+                                ):
+                                    with patch("os._exit"):
+                                        with patch(
+                                            "resource.getrlimit", return_value=(256, 10240)
+                                        ):
+                                            with patch("resource.setrlimit"):
+                                                await orch.run()
+        finally:
+            kiro_crew.shutdown_event.clear()
+
+        # The failed write must not divert control past the clear: the
+        # pre-existing marker files are removed and shutdown completed.
+        assert not marker.exists()
+        assert not pid_marker.exists()
+        orch._shutdown.assert_awaited_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
