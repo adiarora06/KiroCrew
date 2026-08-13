@@ -85,6 +85,9 @@ match when you are debugging a CI-only failure: see
 - **jscpd** duplication check: copy-pasted code fails the build.
 - Coverage is emitted as cobertura XML from `test:website`.
 - `npx tsc -b` and eslint run as their own blocking steps.
+- Coverage runs use at most two fork workers with a 3072 MB old-space ceiling
+  per worker. The cap leaves room for the Vitest coordinator, coverage maps,
+  happy-dom state, and the operating system on a standard hosted runner.
 
 Backend-side test determinism and suite-speed rules (they apply to the same CI run)
 are in

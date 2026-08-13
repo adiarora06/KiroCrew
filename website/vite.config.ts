@@ -488,8 +488,8 @@ export default defineConfig({
     // ceiling that fails a genuine leak loudly instead of dragging the host down.
     // (Vitest 4 pool rework: these are top-level, not poolOptions; minWorkers
     // was removed — only maxWorkers has effect.)
-    maxWorkers: 4,
-    execArgv: ['--max-old-space-size=4096'],
+    maxWorkers: 2,
+    execArgv: ['--max-old-space-size=3072'],
     // Default 5s is too tight for tests that ``await import(...)`` inside the
     // body: under a full concurrent forks run the collect phase can starve the
     // dynamic import past 5s and it times out. 15s gives headroom for
