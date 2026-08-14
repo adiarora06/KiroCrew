@@ -67,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           changed="$(git diff --name-only "$BASE_SHA"...HEAD)"
-          if printf '%s\n' "$changed" | grep -qE '^(website/|temp-screenshots/|\.github/screenshots/)'; then
+          if grep -qE '^(website/|temp-screenshots/|\.github/screenshots/)' <<<"$changed"; then
             echo "ui=true" >> "$GITHUB_OUTPUT"
             echo "UI-relevant changes detected; running UX review."
           else

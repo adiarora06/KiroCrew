@@ -249,7 +249,7 @@ jobs:
           changed="$( { grep -E '^\+\+\+ b/' "$PATCH" | sed 's#^+++ b/##'; \
                         grep -E '^--- a/' "$PATCH" | sed 's#^--- a/##'; } \
                       2>/dev/null | grep -v '^/dev/null$' | sort -u || true )"
-          if printf '%s\n' "$changed" | grep -qE '^(website/|temp-screenshots/|\.github/screenshots/)'; then
+          if grep -qE '^(website/|temp-screenshots/|\.github/screenshots/)' <<<"$changed"; then
             echo "ui=true" >> "$GITHUB_OUTPUT"
             echo "UI-relevant changes detected; running UX review."
           else

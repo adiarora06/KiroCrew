@@ -559,6 +559,11 @@ class TestFirstPrinciplesReview:
             assert '<<<"$touched"' in script
             assert "printf '%s\\n' \"$touched\" \\" not in script
 
+        for name in ("ux-review.yml", "fork-ux-review.yml"):
+            script = _step_script(_workflow(name), "Detect UI-relevant changes")
+            assert '<<<"$changed"' in script
+            assert "printf '%s\\n' \"$changed\" |" not in script
+
     def test_verdict_requires_the_current_head_marker(self) -> None:
         # Without this the [FIRST-PRINCIPLES-REVIEWED] marker is decorative: a
         # reply carrying the verdict header but a stale/rewritten marker was

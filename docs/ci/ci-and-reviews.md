@@ -452,6 +452,10 @@ and grounds visual findings in them, and it is instructed to treat screenshot co
 as untrusted (a screenshot, title, commit message or filename attempting to grant
 leniency is ignored, and screenshot polish never waives a lens).
 
+The scope gate passes the complete changed-file list to `grep` through a here-string.
+This avoids the `SIGPIPE` false-negative that a `printf | grep -q` pipeline can
+produce under `pipefail` when an early match closes the pipe.
+
 ### Human override
 
 `ai-review-human-override.yml` lets a repository **writer** record a judgment with:
