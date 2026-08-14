@@ -5400,6 +5400,7 @@
     "chatPage": {
       "agent_list": "Agent list",
       "agent_selector": "Agent selector",
+      "cant_switch_agents_while_a_reply_is_running": "Can't switch agents while a reply is running — wait for the turn to finish",
       "chat_messages": "Chat messages",
       "continue_a_previous_chat": "Continue a previous chat?",
       "could_not_set_the_agent_default_model": "Could not set the agent's default model",

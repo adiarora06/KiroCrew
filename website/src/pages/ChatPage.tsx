@@ -32,9 +32,10 @@ import { addNotification, removeNotificationByTs } from '../store/notificationsS
 import { onTerminalReady, sendToTerminalSession } from '../utils/terminalRegistry'
 import { interceptSlashCommand, isInterceptedSlashCommand } from './chat/ChatInput'
 import { sseSlotTitle, triggerRefresh } from '../store/dashboardSlice'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import { resolveAskAfterSend } from '../lib/resolveAskAfterSend'
 import type { PlanStepInput } from '../api/client'
+import ErrorNotice from '../components/ErrorNotice'
 import { useProvider } from '../providers'
 import { type AutoNudgeLoop } from '../components/AutoNudgePopover'
 import { fileReadUrl } from '../utils/fileReadUrl'
@@ -71,7 +72,7 @@ const SCROLL_AFTER_RENDER_MS = 100
 // applier); re-exported here for this page's historical importers.
 export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import { PREFILL_STORAGE_KEY, writePrefill } from '../utils/navIntent'
-import { consumeChatHandoff, subscribeChatHandoff } from '../utils/errorReport'
+import { consumeChatHandoff, parseErrorCode, subscribeChatHandoff } from '../utils/errorReport'
 import WelcomeView from '../components/WelcomeView'
 import { usePanelTabs, openPanelView, clearInlineDraft, getInlineDraft, claimAppAutoOpen, useAnyLiveAppTab } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
@@ -1469,6 +1470,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     return () => window.removeEventListener('beforeunload', h)
   }, [flushDrafts])
   const [agentBtnRect, setAgentBtnRect] = useState<DOMRect | null>(null)
+  // Transient feedback for a 409 slot_running refusal from switchAgent (#2418).
+  // Positioned against agentBtnRect — the same rect the dropdown itself used —
+  // so the notice appears right where the dropdown was, even after it has
+  // already closed (the dropdown's onSelect closes it unconditionally, before
+  // this async call settles).
+  const [agentSwitchNotice, setAgentSwitchNotice] = useState<string | null>(null)
+  const agentSwitchNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (agentSwitchNoticeTimer.current) clearTimeout(agentSwitchNoticeTimer.current) }, [])
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [projectBtnRect, setProjectBtnRect] = useState<DOMRect | null>(null)
 
@@ -4190,8 +4199,26 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       setPendingModel('')
       return
     }
-    await api.chatSlotAgent(activeSlot, agentName)
-    setAgentDropdown(false)
+    try {
+      await api.chatSlotAgent(activeSlot, agentName)
+      setAgentDropdown(false)
+    } catch (e) {
+      // The server deterministically refuses a rebind while a turn is running
+      // (409 slot_running, since #1963) rather than tearing down the in-flight
+      // turn. That refusal used to be silently discarded here — the dropdown's
+      // own onSelect already closes it unconditionally, so the user got zero
+      // feedback and no obvious reason the pick didn't take (#2418). Any OTHER
+      // failure still just logs, matching the pre-existing behaviour for a case
+      // this fix doesn't have a specific answer for.
+      if (e instanceof ApiError && parseErrorCode(e.body) === 'slot_running') {
+        if (agentSwitchNoticeTimer.current) clearTimeout(agentSwitchNoticeTimer.current)
+        setAgentSwitchNotice(i18nT('pages.chatPage.cant_switch_agents_while_a_reply_is_running'))
+        agentSwitchNoticeTimer.current = setTimeout(() => setAgentSwitchNotice(null), 5000)
+      } else {
+        // eslint-disable-next-line no-console -- surface unexpected switchAgent failures for debugging
+        console.error('switchAgent failed', e)
+      }
+    }
     // queryClient, setAgentDropdown, and the setPending* setters are all stable
     // (react-query client / useState setters / useCallback([])), so listing them
     // satisfies the linter without re-creating this callback.
@@ -6938,6 +6965,19 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 <AgentDropdownList agents={filteredAgents} activeAgent={currentSlot?.agent || 'default'} defaultAgent={defaultAgent} onSelect={(name) => { switchAgent(name); setAgentDropdown(false) }} onSetDefault={embedded ? undefined : toggleDefaultAgent} filter={agentFilter} />
                 </div>
                 {!embedded && <ManageAgentsFooter error={defaultAgentFailed} onManage={() => { setAgentDropdown(false); navigate('/capabilities?tab=templates') }} />}
+              </div>,
+              document.body
+            )}
+            {/* Agent-switch refusal notice (#2418) — renders at the SAME rect the
+                dropdown used, so it appears where the dropdown was even though the
+                dropdown itself already closed (onSelect closes it before this async
+                refusal can arrive). Not inside the dropdown markup above: the two
+                are mutually exclusive in time (dropdown open vs. refusal after close),
+                and coupling them would need the dropdown to stay mounted through a
+                request it has no other reason to wait on. */}
+            {agentSwitchNotice && agentBtnRect && createPortal(
+              <div className="fixed z-[9999] max-w-[340px]" style={(() => { const left = Math.max(8, Math.min(agentBtnRect.left, window.innerWidth - 348)); return { bottom: window.innerHeight - agentBtnRect.top + 4, left } })()}>
+                <ErrorNotice message={agentSwitchNotice} onDismiss={() => { if (agentSwitchNoticeTimer.current) clearTimeout(agentSwitchNoticeTimer.current); setAgentSwitchNotice(null) }} className="shadow-xl" />
               </div>,
               document.body
             )}

@@ -4,6 +4,15 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Switching agents mid-turn no longer fails silently.** The server has
+  deterministically refused an agent rebind while a turn is running since
+  #1963 (409 `slot_running`, rather than tearing down the in-flight turn),
+  but neither the agent-dropdown picker nor the Alt+Shift+A / Alt+Shift+Z
+  cycle-agent hotkeys were ever built to surface that refusal — the pick
+  silently did nothing. Both paths now catch the refusal and show a
+  transient notice explaining that a reply is running, instead of leaving
+  the user to wonder why the switch didn't take. (#2418)
+
 - **Side-panel oversize-question refusal now reports an accurate character
   target for every script, not just emoji.** The refusal derived its
   character count from a fixed worst-case floor (4 bytes/char, the emoji

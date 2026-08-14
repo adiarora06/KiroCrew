@@ -11,7 +11,7 @@ import { getBuiltinSurfaces, getBuiltinSurface, selectSurfaceBadgeCount, selectS
 import { createSlot, appendMessage, setSlotRunning, switchSlot, selectActiveSlotProject } from './store/chatSlice'
 import { setNavIntentHandler as setArtifactNavIntentHandler } from './utils/artifactPopout'
 import { applyNavIntentInMain } from './utils/navIntent'
-import { installSoftNavigate } from './utils/errorReport'
+import { installSoftNavigate, parseErrorCode } from './utils/errorReport'
 import { fetchNotifications, ackNotification } from './store/notificationsSlice'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useDashboardHealthProbe } from './hooks/useDashboardHealthProbe'
@@ -26,7 +26,7 @@ import { useNativeNotification } from './hooks/useNativeNotification'
 import { useNotificationSound } from './hooks/useNotificationSound'
 import { recordSessionStart, recordEvent } from './rum'
 import { ZoomProvider } from './hooks/ZoomProvider'
-import { api, isAuthBannerShown } from './api/client'
+import { api, ApiError, isAuthBannerShown } from './api/client'
 import type { KiroCreditUsage, KiroUsagePayload } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
 import { gcOrphanedStorage } from './utils/storageGc'
@@ -102,6 +102,7 @@ import { useAgents } from './hooks/useAgents'
 import ShortcutsModal from './components/ShortcutsModal'
 import CommandPalette from './components/CommandPalette'
 import ReportProblemModal from './components/ReportProblemModal'
+import ErrorNotice from './components/ErrorNotice'
 import FeedbackPill from './components/FeedbackPill'
 import KiroAccountModal from './components/KiroAccountModal'
 
@@ -1308,6 +1309,23 @@ export default function App() {
   const { agents: installedAgents, defaultAgent } = useAgents(refreshTrigger)
   const queryClient = useQueryClient()
   const provider = useProvider()
+  // Transient feedback for the cycle-agent hotkeys' 409 slot_running refusal
+  // (#2418) — there is no dropdown here to close, so this toast is the whole
+  // fix for this path (contrast ChatPage's dropdown-adjacent notice for the
+  // picker path, which shares the same server contract but a different UI).
+  const [agentCycleNotice, setAgentCycleNotice] = useState<string | null>(null)
+  const agentCycleNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (agentCycleNoticeTimer.current) clearTimeout(agentCycleNoticeTimer.current) }, [])
+  const reportAgentCycleFailure = useCallback((e: unknown) => {
+    if (e instanceof ApiError && parseErrorCode(e.body) === 'slot_running') {
+      if (agentCycleNoticeTimer.current) clearTimeout(agentCycleNoticeTimer.current)
+      setAgentCycleNotice(i18nT('pages.chatPage.cant_switch_agents_while_a_reply_is_running'))
+      agentCycleNoticeTimer.current = setTimeout(() => setAgentCycleNotice(null), 5000)
+    } else {
+      // eslint-disable-next-line no-console -- surface unexpected cycle-agent failures for debugging
+      console.error('cycle agent failed', e)
+    }
+  }, [])
   useKeyboardShortcuts({ onToggleShortcutsModal: toggleShortcutsModal, onNewChat: () => newChatMutation.mutate(), disabled: shortcutsOpen,
     onCycleAgent: () => {
       const slots = store.getState().dashboard.slots
@@ -1317,7 +1335,7 @@ export default function App() {
       const currentAgent = currentSlot?.agent || defaultAgent
       const idx = installedAgents.findIndex((a: { name: string }) => a.name === currentAgent)
       const nextIdx = (idx + 1) % installedAgents.length
-      api.chatSlotAgent(activeSlot, installedAgents[nextIdx].name)
+      api.chatSlotAgent(activeSlot, installedAgents[nextIdx].name).catch(reportAgentCycleFailure)
     },
     onCyclePrevAgent: () => {
       const slots = store.getState().dashboard.slots
@@ -1327,7 +1345,7 @@ export default function App() {
       const currentAgent = currentSlot?.agent || defaultAgent
       const idx = installedAgents.findIndex((a: { name: string }) => a.name === currentAgent)
       const prevIdx = (idx - 1 + installedAgents.length) % installedAgents.length
-      api.chatSlotAgent(activeSlot, installedAgents[prevIdx].name)
+      api.chatSlotAgent(activeSlot, installedAgents[prevIdx].name).catch(reportAgentCycleFailure)
     },
     onCycleReasoningEffort: () => {
       const activeSlot = store.getState().chat.activeSlot
@@ -2615,6 +2633,17 @@ export default function App() {
       onClose={commandPalette.close}
       openShortcuts={toggleShortcutsModal}
     />
+    {/* Cycle-agent hotkey refusal toast (#2418) — no dropdown to anchor to here,
+        so this is a plain top-center transient banner, auto-dismissed. */}
+    {agentCycleNotice && (
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[9999] max-w-[420px]">
+        <ErrorNotice
+          message={agentCycleNotice}
+          onDismiss={() => { if (agentCycleNoticeTimer.current) clearTimeout(agentCycleNoticeTimer.current); setAgentCycleNotice(null) }}
+          className="shadow-xl"
+        />
+      </div>
+    )}
     {/* Theme decoration: always-mounted decorative overlays (widgets,
         transitions) contributed by the active theme's branding. Absent unless
         a registered theme declares them. Each overlay is isolated in its own

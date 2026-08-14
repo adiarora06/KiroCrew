@@ -65,9 +65,11 @@ vi.mock('../api/client', () => ({
   isAuthBannerShown: vi.fn(() => false),
   ApiError: class ApiError extends Error {
     status: number
-    constructor(status: number, message: string) {
+    body: string
+    constructor(status: number, message: string, body = '') {
       super(message)
       this.status = status
+      this.body = body
     }
   },
 }))
@@ -1012,6 +1014,22 @@ describe('onCycleAgent keyboard shortcut', () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'A', code: 'KeyA', altKey: true, shiftKey: true, bubbles: true }))
     })
     expect(api.chatSlotAgent).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a toast instead of failing silently on a 409 slot_running refusal (#2418)', async () => {
+    const { api, ApiError } = await import('../api/client')
+    const { store } = await import('../store')
+    ;(api.chatSlotAgent as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new ApiError(409, 'a turn is running', JSON.stringify({ code: 'slot_running' }))
+    )
+    store.dispatch({ type: 'dashboard/sseSlots', payload: [{ key: 'slot-1', messages: 0, running: true, agent: 'kirocrew' }] })
+    store.dispatch({ type: 'chat/setActiveSlot', payload: 'slot-1' })
+    renderWithProviders(<App />, { route: '/chat' })
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'A', code: 'KeyA', altKey: true, shiftKey: true, bubbles: true }))
+    })
+    expect(await screen.findByText(/can.t switch agents while a reply is running/i)).toBeInTheDocument()
+    ;(api.chatSlotAgent as ReturnType<typeof vi.fn>).mockResolvedValue({})
   })
 })
 
