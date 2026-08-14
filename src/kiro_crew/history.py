@@ -3738,7 +3738,25 @@ class ConversationLog:
             threads iterating the same list concurrently. Slice or ``list(...)``
             it before mutating. All current callers copy/slice; this contract
             keeps that invariant explicit.
+
+        Holds the same in-process ``_file_lock`` a writer's ``_locked`` takes,
+        across the whole stat -> read -> cache-store sequence (#1835). Without
+        it, a ``rewrite_session`` landing between this method's read and its
+        cache store could restore the file's PRE-rewrite mtime (compaction and
+        rewind deliberately preserve it, so a housekeeping rewrite doesn't
+        reorder ``list_sessions``) after this method already read the OLD
+        content under that same mtime — publishing a cache entry no later
+        mtime comparison could ever tell apart from the fresh one, serving
+        stale messages until process restart. The bare ``_file_lock`` (not the
+        heavier ``_locked``) is deliberate: this is a read, not a mutation, so
+        it needs the in-process serialization against writers but not
+        ``_locked``'s cross-process flock or its mutation-only on-loop
+        strictness check.
         """
+        with self._file_lock(key):
+            return self._read_messages_locked(key)
+
+    def _read_messages_locked(self, key: str) -> list[dict]:
         path = self._path(key)
         if not path.exists():
             self._msg_cache.pop(key, None)

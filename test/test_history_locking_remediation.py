@@ -1714,3 +1714,111 @@ class TestAppendIfAbsent:
         assert seen.get("thread") is not None
         assert seen["thread"] != loop_thread, "ran on the event loop thread"
         assert any(m.get("content") == "hi" for m in log.read_messages("k"))
+
+
+# ── Bug 7: _read_messages cache can be poisoned by a racing mtime-restoring
+#    rewrite (#1835) ─────────────────────────────────────────────────────────
+class TestReadMessagesCacheHoldsWriterLock:
+    """``_read_messages`` used to stat, read, and store its cache entry with no
+    lock held at all. ``rewrite_session`` (compaction, ``chat_regenerate``,
+    ``chat_rewind``) deliberately RESTORES the pre-write mtime so a
+    housekeeping rewrite doesn't reorder ``list_sessions`` — so if that
+    rewrite's ``atomic_write`` + ``_restore_mtime`` + ``_invalidate_cache``
+    landed between ``_read_messages``'s read and its cache store, the store
+    would publish PRE-rewrite content under the (now current again) mtime: a
+    cache entry no later mtime comparison can ever tell apart from a fresh
+    one. The reader now holds the same in-process ``_file_lock`` a writer's
+    ``_locked`` takes, across the whole stat -> read -> store sequence, so the
+    two can no longer interleave.
+    """
+
+    def test_rewrite_cannot_land_between_read_and_cache_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import builtins
+        import threading
+
+        from kiro_crew import history as history_module
+
+        log = ConversationLog(base_dir=tmp_path)
+        log.append("k", "user", "u1")
+
+        rewrite_attempted = threading.Event()
+        rewrite_done = threading.Event()
+
+        def _competitor() -> None:
+            rewrite_attempted.wait(5)
+            # Off-thread rewrite, exactly what compaction/rewind do: replace
+            # the content and restore the pre-write mtime.
+            log.rewrite_session("k", [{"role": "user", "content": "u2-rewritten"}])
+            rewrite_done.set()
+
+        competitor = threading.Thread(target=_competitor)
+        competitor.start()
+
+        real_open = builtins.open
+        reader_thread = threading.current_thread()
+        triggered = threading.Event()
+
+        def _slow_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+            fh = real_open(path, *args, **kwargs)
+            # Slow down ONLY the reader's own (first) open of the session
+            # file. _rewrite_session_locked's internal get_metadata() ALSO
+            # opens this same path (to read the pre-rewrite metadata line) —
+            # slowing that down too would throttle the competitor's own
+            # critical section instead of giving it room to run inside the
+            # reader's window, which is the whole point of this test.
+            if (
+                str(path).endswith("k.jsonl")
+                and threading.current_thread() is reader_thread
+                and not triggered.is_set()
+            ):
+                triggered.set()
+                rewrite_attempted.set()
+                # We are now inside _read_messages's critical window (stat
+                # already taken, file now open). If _read_messages does NOT
+                # hold the writer lock here, the competitor's rewrite —
+                # including its mtime restore and cache invalidation — runs to
+                # completion during this sleep, landing invisibly before our
+                # own cache store below.
+                time.sleep(0.3)
+            return fh
+
+        monkeypatch.setattr(history_module, "open", _slow_open, raising=False)
+
+        # This read starts first and must serialize the rewrite out entirely:
+        # it observes the pre-rewrite content, exactly as if the rewrite had
+        # not started yet.
+        first = log._read_messages("k")
+        competitor.join(timeout=5)
+        assert rewrite_done.is_set(), "competitor rewrite never completed"
+        assert [m.get("content") for m in first] == ["u1"]
+
+        # The real assertion: a SECOND read must see the rewrite's fresh
+        # content, not a cache entry poisoned by the race. Pre-fix, the first
+        # read's store landed AFTER the rewrite's _invalidate_cache pop (which
+        # found nothing to pop), so the stale ("u1", restored-mtime) entry
+        # would survive here and this would come back ["u1"] again.
+        again = log._read_messages("k")
+        assert [m.get("content") for m in again] == ["u2-rewritten"]
+
+    def test_read_messages_locked_runs_under_the_file_lock(self, tmp_path: Path) -> None:
+        """Narrower unit check alongside the race reproduction above: the
+        public wrapper always enters the lock before doing any work, matching
+        every other ``*_locked`` pair in this module (e.g.
+        ``rewrite_session``/``_rewrite_session_locked``)."""
+        log = ConversationLog(base_dir=tmp_path)
+        held: list[bool] = []
+
+        def _spy(key: str) -> list[dict]:
+            held.append(log._file_lock(key).acquire(blocking=False))
+            if held[-1]:
+                log._file_lock(key).release()
+            return []
+
+        log._read_messages_locked = _spy  # type: ignore[method-assign]
+        log._read_messages("k")
+        # acquire(blocking=False) succeeds here because RLock is reentrant for
+        # the SAME thread that already holds it -- so a True confirms the
+        # wrapper's `with self._file_lock(key):` was active when _spy ran.
+        assert held == [True]

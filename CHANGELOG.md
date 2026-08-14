@@ -111,6 +111,22 @@ All notable changes to KiroCrew are documented in this file.
   recordings need it — is now flagged with its install command even while the
   status reads ready. (#3559)
 
+- **A compaction or rewind racing a concurrent read could poison the message
+  cache with stale content for the rest of the process's life.**
+  `ConversationLog._read_messages` stat'd, read, and cached a session's
+  parsed messages with no lock held. `rewrite_session` (compaction,
+  `chat_regenerate`, `chat_rewind`) deliberately restores the file's
+  pre-write mtime so a housekeeping rewrite doesn't reorder `list_sessions` —
+  so a rewrite landing between a read's parse and its cache store could
+  publish pre-rewrite content under that restored mtime, a combination no
+  later mtime comparison could ever tell apart from a fresh entry. Every
+  reader through that cache — transcript rendering, resume, `recent_from_source`,
+  the MCP `get_chat_session` tool — could then show pre-rewrite messages
+  indefinitely, until a gateway restart. `_read_messages` now holds the same
+  in-process lock a writer's rewrite takes across its whole
+  stat-read-cache-store sequence, so the two can no longer interleave.
+  (#1835)
+
 - **`kirocrew` commands start up to ~0.8 s faster, and each MCP stdio server
   drops ~58 MB of resident memory.** `cli.py` imported its full 132-subcommand
   dispatch table at module scope — including the Slack gateway, the dashboard
