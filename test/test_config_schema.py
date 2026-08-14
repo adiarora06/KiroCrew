@@ -306,6 +306,14 @@ class TestConfigSchemaProperties:
         all_fields = _all_fields_recursive(KiroCrewConfig)
         for path, f in all_fields:
             tp = _resolve_type(f)
+            # Unwrap ``X | None`` to X before mapping: the real registry entry
+            # (built via schema.py's own `_optional_inner`) resolves the inner
+            # type, e.g. `float | None` -> "number". Without this unwrap here
+            # too, the union itself falls through `_EXPECTED_TYPE_MAP` to the
+            # "string" catch-all and this test's expectation disagrees with
+            # the registry it's supposed to be checking (#3542, the first
+            # field in the tree to use this shape).
+            tp, _ = _schema_module._optional_inner(tp)
             origin = typing.get_origin(tp)
 
             # Determine expected JSON Schema type

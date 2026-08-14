@@ -4,6 +4,16 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **An explicit `instances.connect_timeout_secs` of exactly 15 (the SSH
+  default) now actually applies to the SSM transport.** `_connect_timeout_for`
+  detected "the user explicitly set this" by comparing the configured value
+  against the SSH default, so a value equal to that default was
+  indistinguishable from never having been set — SSM silently kept its own
+  25s default instead of the user's explicit 15s. The field is now `None` by
+  default (an explicit unset sentinel) rather than pre-filled with the SSH
+  default, so any explicit value, including one that happens to equal a
+  transport's own default, is honored by both transports. (#3542)
+
 - **`kirocrew` commands start up to ~0.8 s faster, and each MCP stdio server
   drops ~58 MB of resident memory.** `cli.py` imported its full 132-subcommand
   dispatch table at module scope — including the Slack gateway, the dashboard

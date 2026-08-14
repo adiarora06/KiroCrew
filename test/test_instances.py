@@ -41,7 +41,12 @@ class TestConfig:
         assert c.enabled is False
         assert c.warm_set_cap == DEFAULT_WARM_SET_CAP == 5
         assert c.tunnel_base_port == DEFAULT_TUNNEL_BASE_PORT == 7778
-        assert c.connect_timeout_secs == DEFAULT_CONNECT_TIMEOUT_SECS == 15.0
+        # Unset by default (None), not the SSH default value -- the field is a
+        # tri-state "no override" sentinel now, not a pre-filled 15.0 that an
+        # explicit 15.0 could never be told apart from. See
+        # test_connect_timeout_default_and_clamps.
+        assert c.connect_timeout_secs is None
+        assert DEFAULT_CONNECT_TIMEOUT_SECS == 15.0
 
     def test_clamps_out_of_range(self):
         from kiro_crew.config.loader import InstancesConfig
@@ -60,7 +65,7 @@ class TestConfig:
             "warm_set_cap": 5,
             "tunnel_base_port": 7778,
             "ssh_compression": True,
-            "connect_timeout_secs": 15.0,
+            "connect_timeout_secs": None,
             "max_recovery_attempts": 8,
             "recover_backoff_max_secs": 30.0,
             "probe_failure_threshold": 3,
@@ -153,20 +158,27 @@ class TestConfig:
             DEFAULT_CONNECT_TIMEOUT_SECS,
         )
 
-        # Default value matches the constant.
+        # Unset by default -- the sentinel that lets each transport fall back
+        # to its own default (SSH 15s / SSM 25s in ssh_tunnel_manager.py).
         c = InstancesConfig()
-        assert c.connect_timeout_secs == DEFAULT_CONNECT_TIMEOUT_SECS == 15.0
+        assert c.connect_timeout_secs is None
 
-        # Explicit override is honored.
+        # Explicit override is honored, INCLUDING a value equal to the SSH
+        # default -- the whole point of the None sentinel is that this no
+        # longer collapses into "unset" the way it did when 15.0 played both
+        # roles (#3542).
         c = InstancesConfig(connect_timeout_secs=45.0)
         assert c.connect_timeout_secs == 45.0
+        c = InstancesConfig(connect_timeout_secs=DEFAULT_CONNECT_TIMEOUT_SECS)
+        assert c.connect_timeout_secs == DEFAULT_CONNECT_TIMEOUT_SECS == 15.0
 
-        # Below 1 falls back to the default.
+        # Below 1 falls back to unset (transport-default) semantics, not a
+        # hardcoded float -- so a too-low SSM override still gets 25s, not 15s.
         c = InstancesConfig(connect_timeout_secs=0.5)
-        assert c.connect_timeout_secs == DEFAULT_CONNECT_TIMEOUT_SECS
+        assert c.connect_timeout_secs is None
 
         c = InstancesConfig(connect_timeout_secs=-10.0)
-        assert c.connect_timeout_secs == DEFAULT_CONNECT_TIMEOUT_SECS
+        assert c.connect_timeout_secs is None
 
         # Above the ceiling is clamped.
         assert CONNECT_TIMEOUT_CEILING_SECS == 120.0
@@ -1213,6 +1225,46 @@ class TestSshTunnelManager:
         return reg, SshTunnelManager(
             reg, base_port=53400, mint_token=mint or ok_mint, tunnel_factory=factory
         )
+
+    def test_connect_timeout_for_unset_uses_per_transport_default(self, tmp_path):
+        """No explicit override (the manager's default) -- SSH and SSM each get
+        their own default, not the SSH one applied to both (#3542)."""
+        from kiro_crew.instances.constants import (
+            DEFAULT_CONNECT_TIMEOUT_SECS,
+            DEFAULT_SSM_CONNECT_TIMEOUT_SECS,
+        )
+
+        assert DEFAULT_SSM_CONNECT_TIMEOUT_SECS != DEFAULT_CONNECT_TIMEOUT_SECS
+        _reg, mgr = self._mgr(tmp_path)
+        assert mgr._connect_timeout_for("ssh") == DEFAULT_CONNECT_TIMEOUT_SECS
+        assert mgr._connect_timeout_for("ssm") == DEFAULT_SSM_CONNECT_TIMEOUT_SECS
+
+    def test_connect_timeout_for_explicit_value_wins_for_both_transports(self, tmp_path):
+        """An explicit override applies to SSM too, EVEN WHEN it is exactly the
+        SSH default (15.0) -- the bug this issue reports. Before the None
+        sentinel, `_connect_timeout != _DEFAULT_CONNECT_TIMEOUT_SECS` was false
+        for exactly this value, so SSM silently got its own 25s default
+        instead of the user's explicit 15s."""
+        from kiro_crew.instances.constants import (
+            DEFAULT_CONNECT_TIMEOUT_SECS,
+            DEFAULT_SSM_CONNECT_TIMEOUT_SECS,
+        )
+        from kiro_crew.instances.registry import InstancesRegistry
+        from kiro_crew.instances.ssh_tunnel_manager import SshTunnelManager
+
+        reg = InstancesRegistry(path=tmp_path / "instances.json")
+        mgr = SshTunnelManager(
+            reg, base_port=53400, connect_timeout_secs=DEFAULT_CONNECT_TIMEOUT_SECS
+        )
+        assert mgr._connect_timeout_for("ssh") == DEFAULT_CONNECT_TIMEOUT_SECS
+        assert mgr._connect_timeout_for("ssm") == DEFAULT_CONNECT_TIMEOUT_SECS
+        assert mgr._connect_timeout_for("ssm") != DEFAULT_SSM_CONNECT_TIMEOUT_SECS
+
+        # A genuinely different override still applies to both, as before.
+        reg2 = InstancesRegistry(path=tmp_path / "instances2.json")
+        mgr2 = SshTunnelManager(reg2, base_port=53401, connect_timeout_secs=45.0)
+        assert mgr2._connect_timeout_for("ssh") == 45.0
+        assert mgr2._connect_timeout_for("ssm") == 45.0
 
     @pytest.mark.asyncio
     async def test_connect_persists_and_idempotent(self, tmp_path):
