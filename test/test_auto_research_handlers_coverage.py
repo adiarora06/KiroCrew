@@ -626,7 +626,12 @@ class TestWatchdogLoop:
         slot = SimpleNamespace(_trust=True, running=False)
         state = SimpleNamespace(_slots={f"research-{cid}": slot})
         assert await _drive_watchdog(
-            {"state": state}, lambda: _status(cid) == h.CampaignStatus.NEEDS_INPUT
+            {"state": state},
+            # Wait on BOTH the status commit and the independently-scheduled SSE
+            # emit (see test_new_verified_finding_completes_the_campaign) -- the
+            # assertion below reads sse.types(), so the SSE half must be observed
+            # before _drive_watchdog's finally cancels the loop.
+            lambda: _status(cid) == h.CampaignStatus.NEEDS_INPUT and "needs_input" in sse.types(),
         )
         assert slot._trust is False
         question = json.loads((h._campaign_dir(cid) / "questions.json").read_text())
@@ -658,7 +663,8 @@ class TestWatchdogLoop:
         _running(cid)
         (h._campaign_dir(cid) / "questions.json").write_text('{"question": "Which DB?"}')
         assert await _drive_watchdog(
-            {"state": None}, lambda: _status(cid) == h.CampaignStatus.NEEDS_INPUT
+            {"state": None},
+            lambda: _status(cid) == h.CampaignStatus.NEEDS_INPUT and "needs_input" in sse.types(),
         )
         assert "needs_input" in sse.types()
 
@@ -678,6 +684,13 @@ class TestWatchdogLoop:
             assert await _await_until(lambda: polls["n"] >= 1)  # baseline count recorded
             _write_finding(cid, 2, verification={"passed": True})
             assert await _await_until(lambda: _status(cid) == h.CampaignStatus.COMPLETE)
+            # The status commit (worker thread) and the SSE emit (call_soon_threadsafe
+            # from _sse_from_thread's on_commit hook) are two separate scheduling
+            # events, not one step — waiting on status alone proves the commit
+            # happened, not that the loop has drained the queued SSE callback yet.
+            # Wait on the SIGNAL THIS TEST ASSERTS ON, or task.cancel() below can win
+            # the race and the "complete" event goes missing from sse.types().
+            assert await _await_until(lambda: "complete" in sse.types())
         finally:
             task.cancel()
             try:
@@ -701,6 +714,11 @@ class TestWatchdogLoop:
             assert await _await_until(lambda: polls["n"] >= 1)
             _write_finding(cid, 2)  # unverified, but hits max_cycles
             assert await _await_until(lambda: _status(cid) == h.CampaignStatus.COMPLETE)
+            # See test_new_verified_finding_completes_the_campaign: the status commit
+            # and the SSE emit are scheduled independently, so wait on the SSE signal
+            # this test actually asserts on rather than relying on task.cancel()'s
+            # timing to have let the queued callback run first.
+            assert await _await_until(lambda: "complete" in sse.types())
         finally:
             task.cancel()
             try:
@@ -722,6 +740,10 @@ class TestWatchdogLoop:
             assert await _await_until(lambda: polls["n"] >= 1)
             _write_finding(cid, 6, new_findings_count=0)
             assert await _await_until(lambda: _status(cid) == h.CampaignStatus.STAGNANT)
+            # See test_new_verified_finding_completes_the_campaign: status commit and
+            # SSE emit are scheduled independently, so wait on the SSE signal this
+            # test actually asserts on.
+            assert await _await_until(lambda: "stagnant" in sse.types())
         finally:
             task.cancel()
             try:
@@ -746,7 +768,12 @@ class TestWatchdogLoop:
         _running(cid)
         _write_finding(cid, 1)
         assert await _drive_watchdog(
-            {"state": None}, lambda: _status(cid) == h.CampaignStatus.FAILED
+            {"state": None},
+            # Wait on BOTH the status commit and the independently-scheduled SSE
+            # emit (see test_new_verified_finding_completes_the_campaign) — the
+            # assertion below reads sse.types(), so the SSE half must be observed
+            # before _drive_watchdog's finally cancels the loop.
+            lambda: _status(cid) == h.CampaignStatus.FAILED and "failed" in sse.types(),
         )
         assert "stalled" in (h.get_campaign(cid) or {})["error_message"]
         svc.update.assert_awaited_once_with(terminating_loop.id, active=False)
