@@ -479,3 +479,42 @@ class TestGenuineFailureStaysRed:
         # say so instead of presenting itself as a complete evaluation.
         summary = (runner.temp / "pr-readiness-summary.md").read_text()
         assert "truncated" in summary
+
+
+class TestLaneStateIsLoggedNotOnlySummarized:
+    """#3550: a run that publishes a wrong verdict (e.g. a lane invisible
+    under GITHUB_TOKEN but visible under a user token) could previously only
+    be diagnosed by opening the $GITHUB_STEP_SUMMARY UI by hand --
+    `gh run view --log` cannot query it. The evaluate step must also echo the
+    lane arrays to the job's own stdout log."""
+
+    def test_all_green_run_logs_every_lane_as_passed(self, runner: Runner):
+        proc, outputs = runner.evaluate()
+        assert proc.returncode == 0, proc.stderr
+        assert outputs["status_state"] == "success"
+        log_line = next(
+            line for line in proc.stdout.splitlines() if line.startswith("pr-readiness: lane state")
+        )
+        assert "pending=[]" in log_line
+        assert "failed=[]" in log_line
+        # Real lane labels, not just a non-empty bucket -- proves the log line
+        # carries the SAME names the summary does, not a placeholder.
+        assert "CI" in log_line
+        assert "Opus 4.8 Review" in log_line
+
+    def test_a_stuck_lane_is_named_in_the_log_line(self, runner: Runner):
+        # The exact #3550 shape: one lane never completes (still queued),
+        # everything else green. The diagnostic line must name it so a
+        # stuck-pending PR is diagnosable from `gh run view --log` alone,
+        # without opening the step-summary UI.
+        (runner.fixtures / "codeql_runs.json").write_text(
+            _run_json("codeql", status="queued", conclusion="")
+        )
+        proc, outputs = runner.evaluate()
+        assert proc.returncode == 0, proc.stderr
+        assert outputs["status_state"] == "pending"
+        log_line = next(
+            line for line in proc.stdout.splitlines() if line.startswith("pr-readiness: lane state")
+        )
+        assert "CodeQL" in log_line
+        assert "pending=[CodeQL" in log_line
