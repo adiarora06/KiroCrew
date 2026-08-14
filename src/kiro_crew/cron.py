@@ -644,6 +644,14 @@ class CronService:
         self._on_job = on_job
         self._jobs: list[CronJob] = []
         self._timer_task: asyncio.Task[None] | None = None
+        # True only while _on_timer's due-scan + dispatch is actually running
+        # (set/cleared around that one await in _tick). A job finishing DURING
+        # that window must not cancel _timer_task via _arm_timer — see the
+        # guard in _arm_timer for why — so it re-arms itself for free once
+        # _on_timer returns instead: _tick's own finally already calls
+        # _arm_timer() there, by which point the finishing job is no longer in
+        # _executing, so that arm computes the job's true next-due delay.
+        self._on_timer_running = False
         self._running = False
         # The event loop this service is bound to, captured in create()/start()
         # (the gateway's loop). _arm_timer() uses it to re-arm the timer THREAD-
@@ -2315,6 +2323,19 @@ class CronService:
                 bound.call_soon_threadsafe(self._arm_timer)
             return
         current = asyncio.current_task()
+        if self._on_timer_running and self._timer_task is not current:
+            # A DIFFERENT task (e.g. a job's own completion, see
+            # _run_job_isolated) is asking to re-arm while the tick is mid
+            # `_on_timer` — a real interleave window, since `_on_timer` awaits
+            # `asyncio.to_thread` for its due-scan. Cancelling `_timer_task`
+            # here would fire a CancelledError into that await, aborting the
+            # in-flight dispatch and dropping any due jobs not yet spawned
+            # this sweep. Do nothing: `_tick`'s own `finally` calls
+            # `_arm_timer()` again the moment `_on_timer` returns, and by then
+            # the finishing job is out of `_executing`, so THAT arm computes
+            # its true next-due delay — the re-arm is deferred to a safe
+            # point, not lost.
+            return
         # Never cancel the timer task if we ARE that task. The tick's own
         # `finally` re-arms while the tick coroutine is still executing, so a
         # blind `self._timer_task.cancel()` there fires a CancelledError back
@@ -2339,11 +2360,13 @@ class CronService:
             except asyncio.TimeoutError:
                 pass  # normal wake-up
             if self._running:
+                self._on_timer_running = True
                 try:
                     await self._on_timer()
                 except Exception:
                     logger.exception("Cron timer error — will re-arm")
                 finally:
+                    self._on_timer_running = False
                     # Always re-arm, even after errors
                     if self._running:
                         self._arm_timer()
@@ -2546,6 +2569,17 @@ class CronService:
             self._cancelled_jobs.discard(job.id)
             self._executing.discard(job.id)
             self._running_tasks.pop(job.id, None)
+            # Re-arm now that this job is no longer invisible to the wake
+            # calculation (`_next_wake_secs` skips anything in `_executing`).
+            # Without this, a job whose run ate most of its interval has to
+            # wait for whatever wake was already armed while it was still
+            # running — up to `_TIMER_POLL_SECS` (30s) late — because
+            # finishing a job was never one of the mutations that re-arms the
+            # timer (#3651). Safe to call unconditionally: `_arm_timer`
+            # defers to the in-flight tick's own re-arm instead of cancelling
+            # it when `_on_timer` is mid-dispatch (see its guard), and is a
+            # no-op once the service has stopped running.
+            self._arm_timer()
             # Notify dashboard that the job has finished (clears the badge).
             try:
                 if self._push_refresh:

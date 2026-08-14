@@ -111,6 +111,21 @@ All notable changes to KiroCrew are documented in this file.
   recordings need it — is now flagged with its install command even while the
   status reads ready. (#3559)
 
+- **A cron job whose run eats most of its interval no longer waits an extra
+  ~30s past its next due time.** A running job is invisible to the
+  scheduler's wake calculation (it's excluded while `_executing`), so a
+  timer tick that fires mid-run only sees other jobs and can arm the full
+  `_TIMER_POLL_SECS` (30s) poll interval. Finishing a job never re-armed the
+  timer, so the service just waited out whatever wake was already
+  scheduled instead of the job's true (often much sooner) next-due delay —
+  measured on a live deployment at up to 20% of consecutive-run gaps ≥20s
+  for a job whose duration was 95% of its interval. Job completion now
+  re-arms the timer. Safe under the one real hazard this creates — a job
+  finishing while the timer's own tick is mid-dispatch (an
+  `asyncio.to_thread` await inside `_on_timer`) — by deferring to that
+  tick's own post-dispatch re-arm instead of cancelling it, so an in-flight
+  sweep can never lose a due job it hasn't spawned yet. (#3651)
+
 - **`kirocrew` commands start up to ~0.8 s faster, and each MCP stdio server
   drops ~58 MB of resident memory.** `cli.py` imported its full 132-subcommand
   dispatch table at module scope — including the Slack gateway, the dashboard

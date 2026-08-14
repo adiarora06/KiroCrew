@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -133,6 +133,140 @@ class TestArmTimer:
         svc._arm_timer()
         assert svc._timer_task is not None
         assert not svc._timer_task.done()
+        await svc.stop()
+
+
+class TestJobCompletionRearms:
+    """A job finishing must re-arm the timer (#3651): a long-running job is
+    invisible to `_next_wake_secs` while `_executing`, so the wake computed
+    during its run can arm up to `_TIMER_POLL_SECS` (30s) out. Without a
+    re-arm on completion, the service waits for that stale wake instead of
+    the job's true (often much sooner) next-due delay.
+    """
+
+    @pytest.mark.asyncio
+    async def test_job_completion_calls_arm_timer(self, tmp_path: Path) -> None:
+        """Wiring guard: `_run_job_isolated`'s finally must call `_arm_timer`.
+        `wraps=` keeps the real re-arm behavior intact while tracking the call,
+        so this fails loudly (not just silently) if the call site is reverted."""
+        gate = asyncio.Event()
+
+        async def callback(job: CronJob) -> None:
+            await gate.wait()
+
+        svc = CronService(base_dir=tmp_path, on_job=callback)
+        await svc.start()
+        svc.add_job("j", "msg", every_secs=60)
+        svc._jobs[0].last_run_ts = time.time() - 120
+        job_id = svc._jobs[0].id
+
+        await svc._on_timer()
+        assert job_id in svc._executing
+
+        with patch.object(svc, "_arm_timer", wraps=svc._arm_timer) as mock_arm:
+            gate.set()
+            await svc._running_tasks[job_id]
+            assert mock_arm.called, "job completion must re-arm the timer"
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_arm_timer_does_not_cancel_an_in_flight_on_timer(self, tmp_path: Path) -> None:
+        """The hazard the naive fix has: `_on_timer` awaits `asyncio.to_thread`
+        for its due-scan, a real interleave window. A DIFFERENT task (a job
+        completing) calling `_arm_timer` during that window must not cancel
+        the in-flight tick -- that would drop any due jobs not yet dispatched
+        this sweep. Stands in for `_on_timer`'s one await point with a plain
+        gate so the interleave is deterministic rather than timing-dependent.
+        """
+        svc = CronService(base_dir=tmp_path)
+        svc._running = True
+        gate = asyncio.Event()
+
+        async def fake_tick() -> None:
+            svc._on_timer_running = True
+            try:
+                await gate.wait()
+            finally:
+                svc._on_timer_running = False
+
+        original_task = asyncio.create_task(fake_tick())
+        svc._timer_task = original_task
+        await asyncio.sleep(0)  # let fake_tick start and set the flag
+        assert svc._on_timer_running is True
+
+        svc._arm_timer()  # stands in for a job's completion re-arm
+
+        assert svc._timer_task is original_task
+        assert not svc._timer_task.cancelled()
+        assert not svc._timer_task.done()
+
+        gate.set()
+        await svc._timer_task  # must complete normally, no CancelledError
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_deferred_rearm_still_happens_once_on_timer_completes(
+        self, tmp_path: Path
+    ) -> None:
+        """The re-arm request skipped during the in-flight window above must
+        not be LOST -- `_tick`'s own finally re-arms unconditionally once
+        `_on_timer` returns, by which point a job that finished during the
+        window is out of `_executing`, so that arm reflects its true delay."""
+        svc = CronService(base_dir=tmp_path)
+        svc._running = True
+        gate = asyncio.Event()
+
+        async def fake_tick() -> None:
+            svc._on_timer_running = True
+            try:
+                await gate.wait()
+            finally:
+                svc._on_timer_running = False
+                svc._arm_timer()  # mirrors _tick's own post-_on_timer re-arm
+
+        original_task = asyncio.create_task(fake_tick())
+        svc._timer_task = original_task
+        await asyncio.sleep(0)
+
+        svc._arm_timer()  # deferred re-arm request, swallowed per the guard
+        assert not original_task.cancelled()
+
+        gate.set()
+        await original_task
+        await asyncio.sleep(0)  # let the finally's _arm_timer() install the new task
+        # A genuinely new timer task now exists -- the deferred request was
+        # honored once it was safe, not dropped on the floor.
+        assert svc._timer_task is not original_task
+        assert svc._timer_task is not None and not svc._timer_task.done()
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_on_timer_running_flag_true_only_during_dispatch(
+        self, tmp_path: Path
+    ) -> None:
+        """Confirms the flag is wired into the REAL `_tick`, not just the
+        `fake_tick` stand-ins above: true while `_on_timer` runs, false
+        immediately before and after."""
+        svc = CronService(base_dir=tmp_path)
+        svc._running = True
+        seen_during: list[bool] = []
+        real_on_timer = svc._on_timer
+
+        async def spy_on_timer() -> None:
+            seen_during.append(svc._on_timer_running)
+            await real_on_timer()
+
+        svc._on_timer = spy_on_timer  # type: ignore[method-assign]
+        svc._effective_delay = lambda: 0.01  # type: ignore[method-assign]
+
+        assert svc._on_timer_running is False
+        svc._arm_timer()
+        task = svc._timer_task
+        assert task is not None
+        await asyncio.wait_for(task, timeout=5)
+
+        assert seen_during == [True]
+        assert svc._on_timer_running is False
         await svc.stop()
 
 
