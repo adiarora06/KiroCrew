@@ -574,6 +574,19 @@ class TestFirstPrinciplesReview:
         assert 'v=""' in fork
         assert "HEAD_SHA: ${{ steps.pr.outputs.head_sha }}" in fork
 
+        expected = {
+            "design-review.yml": ("DESIGN-REVIEWED", "$HEAD"),
+            "fork-design-review.yml": ("DESIGN-REVIEWED", "$HEAD_SHA"),
+            "ux-review.yml": ("UX-REVIEWED", "$HEAD"),
+            "fork-ux-review.yml": ("UX-REVIEWED", "$HEAD"),
+        }
+        for name, (marker, head) in expected.items():
+            workflow = _workflow(name)
+            assert f'grep -qF "[{marker}] {head}" <<<"$summary"' in workflow
+            assert "treating as incomplete" in workflow
+
+        assert "HEAD_SHA: ${{ steps.pr.outputs.head_sha }}" in _workflow("fork-design-review.yml")
+
     def test_fork_lane_grants_no_shell_and_reads_intent_from_a_file(self) -> None:
         # `--allowedTools` Bash grants are PREFIX-matched, so `Bash(gh pr view:*)`
         # also admits `gh pr view ... > authentic.patch` -- an injected

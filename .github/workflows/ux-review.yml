@@ -476,6 +476,10 @@ jobs:
           fi
           # Machine-parse the verdict header the prompt requires (case-insensitive).
           verdict="$(printf '%s\n' "$summary" | grep -iE '^UX-Verdict:' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr '[:lower:]' '[:upper:]')"
+          if ! grep -qF "[UX-REVIEWED] $HEAD" <<<"$summary"; then
+            echo "verdict header present but the [UX-REVIEWED] $HEAD marker is missing; treating as incomplete"
+            verdict=""
+          fi
           [ -z "$verdict" ] && verdict="UNKNOWN"
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           case "$verdict" in

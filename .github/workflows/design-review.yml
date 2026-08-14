@@ -342,6 +342,10 @@ jobs:
           fi
           # Machine-parse the verdict header the prompt requires (case-insensitive).
           verdict="$(printf '%s\n' "$summary" | grep -iE '^Design-Verdict:' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr '[:lower:]' '[:upper:]')"
+          if ! grep -qF "[DESIGN-REVIEWED] $HEAD" <<<"$summary"; then
+            echo "verdict header present but the [DESIGN-REVIEWED] $HEAD marker is missing; treating as incomplete"
+            verdict=""
+          fi
           [ -z "$verdict" ] && verdict="UNKNOWN"
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           MARKER="<!-- design-review -->"

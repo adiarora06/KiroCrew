@@ -242,6 +242,11 @@ design axis is **what each is allowed to read** (its prompt-injection surface) a
 | UX Review | `UX Review` | Agentic Fable 5, with the same fallback | Code plus committed screenshot PNGs, read directly | Does the shipped experience read correctly? | Advisory; red only on a genuine `BLOCK` |
 | First Principles | `First Principles Review` | Agentic Fable 5, same fallback, `--max-turns 120` (inventorying and counting is grep-heavy) | Code, the whole repository, and `gh pr view` | What is the author trying to do, and does each thing this ships *deserve to exist*, already exist, or only patch a symptom? | Advisory; red only on a genuine `BLOCK` |
 
+Each advisory reviewer must end its output with its lane-specific reviewed marker
+and the exact current head SHA. A verdict header without that current-head marker is
+treated as incomplete, so output from an earlier revision cannot be accepted after a
+push.
+
 ### Why a first-principles lane is not a second Design Review
 
 Design Review takes the PR's **stated problem as its frame** and judges the shape of

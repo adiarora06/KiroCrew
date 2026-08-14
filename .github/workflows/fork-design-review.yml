@@ -464,6 +464,7 @@ jobs:
         if: always()
         env:
           EXEC_FILE: ${{ steps.review.outputs.execution_file }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -uo pipefail
           summary=""
@@ -477,6 +478,10 @@ jobs:
           verdict="UNKNOWN"
           if [ -s "$RUNNER_TEMP/design-review-output.md" ]; then
             v="$(printf '%s\n' "$summary" | grep -iE '^Design-Verdict:' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tr '[:lower:]' '[:upper:]')"
+            if [ -n "$v" ] && ! grep -qF "[DESIGN-REVIEWED] $HEAD_SHA" <<<"$summary"; then
+              echo "verdict header present but the [DESIGN-REVIEWED] $HEAD_SHA marker is missing; treating as incomplete"
+              v=""
+            fi
             [ -n "$v" ] && verdict="$v"
           fi
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
