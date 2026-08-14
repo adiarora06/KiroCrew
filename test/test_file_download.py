@@ -188,6 +188,23 @@ async def test_symlink_rejected(tmp_path, mock_sel):
 
 
 @pytest.mark.asyncio
+async def test_downloads_without_crashing_on_a_platform_with_no_o_nofollow(tmp_path, mock_sel, monkeypatch):
+    """#3164: Windows' ``os`` module has no ``O_NOFOLLOW`` attribute, so a bare
+    ``os.O_NOFOLLOW`` reference raised ``AttributeError`` on every download,
+    not just a symlinked one. ``getattr(os, "O_NOFOLLOW", 0)`` is the fix --
+    simulated here by removing the attribute rather than by actually running
+    on Windows."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    f = tmp_path / "plain.docx"
+    f.write_bytes(_DOCX_LIKE_BYTES)
+    with patch("kiro_crew.dashboard.handlers._validate_dashboard_path", return_value=str(f)):
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.get(f"/api/file-download?path={f}")
+            assert resp.status == 200
+            assert await resp.read() == _DOCX_LIKE_BYTES
+
+
+@pytest.mark.asyncio
 async def test_oversize_file_rejected(tmp_path, mock_sel):
     """Files larger than _MAX_UPLOAD_BYTES (50 MB) must be rejected with 413
     before the body is buffered. We simulate via stat patching to avoid

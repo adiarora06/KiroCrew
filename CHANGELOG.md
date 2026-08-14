@@ -4,6 +4,14 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Fixed a Windows-only crash opening any file in the dashboard file
+  viewer.** `dashboard/handlers/files.py` referenced `os.O_NOFOLLOW` bare in
+  two places — a flag that does not exist on Windows' `os` module — so every
+  call to `/api/file-download` and `/api/file-raw` raised `AttributeError`
+  instead of serving the file, symlinked or not. Now uses
+  `getattr(os, "O_NOFOLLOW", 0)`, the pattern already used in 15+ other
+  places in the codebase for the same reason. (#3164)
+
 - **Side-panel oversize-question refusal now reports an accurate character
   target for every script, not just emoji.** The refusal derived its
   character count from a fixed worst-case floor (4 bytes/char, the emoji

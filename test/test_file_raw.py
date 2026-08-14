@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -124,6 +125,21 @@ async def test_rejects_symlink(tmp_path, mock_sel):
             resp = await client.get(f"/api/file-raw?path={link}")
             assert resp.status == 403
             assert "symlink" in (await resp.json())["error"]
+
+
+@pytest.mark.asyncio
+async def test_serves_without_crashing_on_a_platform_with_no_o_nofollow(tmp_path, mock_sel, monkeypatch):
+    """#3164: Windows' ``os`` module has no ``O_NOFOLLOW`` attribute, so a bare
+    ``os.O_NOFOLLOW`` reference raised ``AttributeError`` on every file-viewer
+    open, not just a symlinked one. Simulated here by removing the attribute
+    rather than by actually running on Windows."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    f = tmp_path / "test.png"
+    f.write_bytes(_PNG_HEADER)
+    with patch("kiro_crew.dashboard.handlers._validate_dashboard_path", return_value=str(f)):
+        async with TestClient(TestServer(_make_app())) as client:
+            resp = await client.get(f"/api/file-raw?path={f}")
+            assert resp.status == 200
 
 
 @pytest.mark.asyncio
