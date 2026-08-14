@@ -438,7 +438,15 @@ log "Packaging desktop app (electron-builder, version: $KC_VERSION)…"
     # scheme could not disambiguate the two apps (none is registered today).
     EB_ARGS+=(
       "-c.productName=KiroCrew Nightly"
-      "-c.mac.icon=icon-nightly.png"
+      # .icns, not .png: electron-builder's own PNG->icns synthesis writes
+      # PNG-encoded payloads into the small (16pt/32pt) icns slots, which
+      # macOS decodes as raw ARGB -- coloured static in Spotlight/Finder list
+      # view (#3647). The committed icon-nightly.icns is pre-built with
+      # iconutil (see packaging/make-icns.sh) and ships unmodified because
+      # app-builder-lib's icon resolver passes through a source that already
+      # carries the target extension. linux/win keep .png -- the defect is
+      # specific to electron-builder's own icns synthesis.
+      "-c.mac.icon=icon-nightly.icns"
       "-c.linux.icon=icon-nightly.png"
       "-c.win.icon=icon-nightly.png"
       # Finder/Dock title (CFBundleDisplayName) mirrors the spaced display

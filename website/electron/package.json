@@ -28,7 +28,7 @@
     "productName": "KiroCrew",
     "mac": {
       "category": "public.app-category.developer-tools",
-      "icon": "icon.png",
+      "icon": "icon.icns",
       "target": [
         "dmg",
         "zip"

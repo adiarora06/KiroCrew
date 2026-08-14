@@ -111,6 +111,19 @@ All notable changes to KiroCrew are documented in this file.
   recordings need it — is now flagged with its install command even while the
   status reads ready. (#3559)
 
+- **The macOS app icon no longer renders as coloured static at 16pt/32pt**
+  (Spotlight rows, Finder list view, and third-party app pickers). `mac.icon`
+  pointed at a bare `icon.png`, so electron-builder synthesized the `.icns`
+  itself and wrote PNG payloads into the legacy `icp4`/`icp5` slots; macOS
+  decodes those two slots as raw ARGB, so it painted the compressed PNG byte
+  stream as pixels (128pt+ icons were unaffected — those slots are
+  PNG-decoded). `mac.icon` (and the nightly build override) now points at a
+  committed `.icns` built with `iconutil` (`packaging/make-icns.sh`), which
+  writes the correct ARGB-prefixed payloads for the small slots. A byte-level
+  regression test parses the shipped `.icns` files directly so a
+  regeneration that goes back through electron-builder's own PNG→icns path
+  fails loudly instead of silently reintroducing the defect. (#3647)
+
 - **`kirocrew` commands start up to ~0.8 s faster, and each MCP stdio server
   drops ~58 MB of resident memory.** `cli.py` imported its full 132-subcommand
   dispatch table at module scope — including the Slack gateway, the dashboard
