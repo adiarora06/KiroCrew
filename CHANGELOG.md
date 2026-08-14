@@ -4,6 +4,20 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **`kirocrew-computer` no longer spawns its ~109 MB backend process on
+  every chat process when the feature is disabled or unsupported on the
+  platform.** The managed MCP server was registered into the resolved agent
+  spec unconditionally; the keystone primary-enable and platform checks only
+  ran *inside* the already-running shim, after kiro-cli had already spawned
+  it. On a non-macOS host, or a macOS host that never enabled the feature,
+  every chat process — including every `spawn_run` subagent — paid that cost
+  for a capability it could never invoke. The managed-server entry now
+  carries a `spec_allowed_fn` gate (platform + keystone) consulted before the
+  entry is emitted into `mcpServers`, on both a fresh install and a refresh
+  of an existing config (which also drops a stale entry once the gate no
+  longer passes). The two in-process checks stay as defence in depth for a
+  mid-session disable. (#3482)
+
 - **Side-panel oversize-question refusal now reports an accurate character
   target for every script, not just emoji.** The refusal derived its
   character count from a fixed worst-case floor (4 bytes/char, the emoji

@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -216,6 +217,131 @@ def test_fresh_install_registers_the_server(tmp_path: Path):
     cfg_dir = _bundled_defaults(tmp_path)
     config = _installed(_run_install(tmp_path, cfg_dir))
     assert CU_SERVER in config["mcpServers"]
+
+
+# ── spec-emission gate (#3482): platform + keystone, using the REAL managed
+# dict (not the ``_MANAGED`` test fixture) so ``spec_allowed_fn`` is exercised.
+
+
+def _run_install_real_managed(tmp_path: Path, cfg_dir: Path, **kwargs) -> Path:
+    """Like ``_run_install``, but does NOT override ``_MANAGED_MCP_SERVERS``.
+
+    The gate under test (``spec_allowed_fn``) lives on the real
+    ``agent._MANAGED_MCP_SERVERS['kirocrew-computer']`` entry; the ``_MANAGED``
+    fixture used elsewhere in this file omits that key entirely, which is
+    exactly why those tests must not be the ones proving the gate works.
+    """
+    kiro_dir = tmp_path / "kiro_agents"
+    kiro_dir.mkdir(exist_ok=True)
+    mc_config = tmp_path / "mc_config.json"
+    if not mc_config.exists():
+        mc_config.write_text(json.dumps({"agent": {"kiro_hooks_autoimport": False}}))
+
+    patches = [
+        patch.multiple(
+            "kiro_crew.agent",
+            KIRO_AGENTS_DIR=kiro_dir,
+            _BUNDLED_CFG_DIR=cfg_dir,
+            _KIROCREW_BIN="/usr/bin/kirocrew",
+            _KIRO_MCP_JSON=tmp_path / "fake_kiro_mcp.json",
+            _CC_MCP_JSON=tmp_path / "fake_cc_mcp.json",
+        ),
+        patch("kiro_crew.agent._user_dir", lambda: tmp_path / "home"),
+        patch("kiro_crew.agent._prompt_path", return_value=cfg_dir / "prompt.md"),
+        patch("kiro_crew.agent._shipped_defaults", return_value=cfg_dir / "defaults.json"),
+        patch("kiro_crew.agent._project_dir", return_value=None),
+        patch("kiro_crew.agent._aim_skill_paths", return_value=[]),
+        patch("kiro_crew.agent.shutil.which", side_effect=lambda c, **kw: c),
+        patch("kiro_crew.agent._mc_config_path", return_value=mc_config),
+    ]
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        return install_agent(**kwargs)
+
+
+@pytest.fixture
+def cu_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect ``KIROCREW_HOME`` so the keystone read in the gate lands in a
+    tmp dir, never a developer's real ``~/.kiro/crew/computer_use.json``."""
+    monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "cu_home"))
+    return tmp_path / "cu_home"
+
+
+def _write_keystone(cu_home: Path, **state: Any) -> None:
+    from kiro_crew.computer_use.types import STATE_FILE_NAME
+
+    cu_home.mkdir(parents=True, exist_ok=True)
+    (cu_home / STATE_FILE_NAME).write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_non_darwin_spec_has_no_computer_entry_even_when_keystone_enabled(
+    tmp_path: Path, cu_home: Path
+):
+    """Non-macOS: no entry, no matter what the keystone says.
+
+    Computer use has no driver outside macOS, so a keystone left ``enabled``
+    from a config carried over between machines must not spawn a process that
+    can never do anything on this platform.
+    """
+    _write_keystone(cu_home, enabled=True)
+    cfg_dir = _bundled_defaults(tmp_path)
+    with patch("kiro_crew.agent.platform_compat.IS_MACOS", False):
+        config = _installed(_run_install_real_managed(tmp_path, cfg_dir))
+    # Asserted on the spec (mcpServers), not the tool list: the bundled
+    # defaults.json ships ``@kirocrew-computer`` in ``tools`` unconditionally
+    # (the shim's own empty tools/list already covers that layer). What must
+    # not happen is kiro-cli being told to SPAWN the process.
+    assert CU_SERVER not in config["mcpServers"]
+
+
+@pytest.mark.parametrize(
+    "keystone_state",
+    [
+        None,  # absent entirely
+        {},
+        {"enabled": False},
+        {"enabled": "false"},  # truthy non-True string
+        {"enabled": 1},  # truthy non-True int
+    ],
+)
+def test_darwin_spec_has_no_computer_entry_while_keystone_is_not_true(
+    tmp_path: Path, cu_home: Path, keystone_state
+):
+    """Darwin: still no entry unless the keystone spells ``"enabled": true``
+    exactly, mirroring the four keystone cases in ``test_mcp_computer.py``."""
+    if keystone_state is not None:
+        _write_keystone(cu_home, **keystone_state)
+    cfg_dir = _bundled_defaults(tmp_path)
+    with patch("kiro_crew.agent.platform_compat.IS_MACOS", True):
+        config = _installed(_run_install_real_managed(tmp_path, cfg_dir))
+    assert CU_SERVER not in config["mcpServers"]
+
+
+def test_darwin_with_keystone_enabled_emits_the_entry(tmp_path: Path, cu_home: Path):
+    """The one path that must work: darwin + ``{"enabled": true}`` -> emitted.
+
+    Guards against over-gating — a fix for #3482 that also silently disabled
+    the feature for its one supported, opted-in configuration would be worse
+    than the bug.
+    """
+    _write_keystone(cu_home, enabled=True)
+    cfg_dir = _bundled_defaults(tmp_path)
+    with patch("kiro_crew.agent.platform_compat.IS_MACOS", True):
+        config = _installed(_run_install_real_managed(tmp_path, cfg_dir))
+    assert CU_SERVER in config["mcpServers"]
+
+
+def test_refresh_drops_a_previously_emitted_entry_once_disallowed(tmp_path: Path, cu_home: Path):
+    """A gateway restart after the keystone flips off actually reclaims the
+    process — the refresh path must remove a stale entry, not just skip
+    re-adding one, or the ~109 MB process survives every disable until the
+    user edits ``kirocrew.json`` by hand."""
+    cfg_dir = _bundled_defaults(tmp_path)
+    _existing_config(tmp_path, {"command": "/usr/bin/kirocrew", "args": [CU_SUBCOMMAND]})
+    with patch("kiro_crew.agent.platform_compat.IS_MACOS", True):
+        config = _installed(_run_install_real_managed(tmp_path, cfg_dir))
+    assert CU_SERVER not in config["mcpServers"]
 
 
 # ── refresh of an existing config ──

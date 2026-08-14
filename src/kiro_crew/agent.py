@@ -479,6 +479,25 @@ def _kirocrew_mcp_invocation(subcommand: str) -> tuple[str, list[str]]:
     return bin_path, [subcommand]
 
 
+def _computer_use_managed_server_allowed() -> bool:
+    """Whether ``kirocrew-computer`` may be emitted into the resolved agent spec.
+
+    Gates SPEC EMISSION, not just the in-process tool list (#3482). The shim's
+    own ``enable_state.is_enabled()`` checks (``mcp_computer.py``'s
+    ``_list_tools`` / ``_call_tool_inner``) only run once kiro-cli has already
+    spawned the ~109 MB backend process — so on a disabled install, or on any
+    platform other than macOS (this feature's only supported one), every chat
+    process paid that cost for a capability it could never invoke. Those two
+    in-process checks stay as defence in depth for a mid-session disable; this
+    is the first gate that stops the process from existing at all.
+    """
+    if not platform_compat.IS_MACOS:
+        return False
+    from kiro_crew.computer_use import enable_state
+
+    return enable_state.is_enabled()
+
+
 # ---------------------------------------------------------------------------
 # Managed MCP servers — single source of truth.
 #
@@ -489,10 +508,12 @@ def _kirocrew_mcp_invocation(subcommand: str) -> tuple[str, list[str]]:
 _MANAGED_MCP_SERVERS: dict[str, dict] = {
     "kirocrew-cron": {"invocation_fn": lambda: _kirocrew_mcp_invocation("mcp-cron")},
     "kirocrew-core": {"invocation_fn": lambda: _kirocrew_mcp_invocation("mcp-core")},
-    # Computer use (native desktop GUI automation).  Registered unconditionally —
-    # its stdio shim returns an EMPTY tools/list while the keystone primary enable
-    # is off, so a disabled feature costs the model no context and needs no
-    # per-server ``enabled_fn`` in this loop.
+    # Computer use (native desktop GUI automation). ``spec_allowed_fn`` gates
+    # whether this entry is emitted into the resolved spec at all (platform +
+    # keystone) — see _computer_use_managed_server_allowed. Its stdio shim
+    # ALSO returns an EMPTY tools/list while the keystone primary enable is
+    # off; that stays as defence in depth for a mid-session disable, not a
+    # substitute for this gate.
     #
     # DELIBERATELY NO ``autoApprove`` KEY, and none may ever be added: kiro-cli
     # approves an autoApproved MCP tool locally and emits no permission request,
@@ -500,7 +521,10 @@ _MANAGED_MCP_SERVERS: dict[str, dict] = {
     # floor, the sensitive-path check and the governance ceiling — is NEVER
     # reached for it. For a tool that can click in an already-authenticated
     # application that would be a complete gate bypass.
-    "kirocrew-computer": {"invocation_fn": lambda: _kirocrew_mcp_invocation("mcp-computer")},
+    "kirocrew-computer": {
+        "invocation_fn": lambda: _kirocrew_mcp_invocation("mcp-computer"),
+        "spec_allowed_fn": _computer_use_managed_server_allowed,
+    },
 }
 
 
@@ -1584,6 +1608,10 @@ def build_agent_config() -> dict:
     mcp = config.setdefault("mcpServers", {})
     registry_mode = _mcp_registry_mode()
     for name, spec in _MANAGED_MCP_SERVERS.items():
+        allowed_fn = spec.get("spec_allowed_fn")
+        if allowed_fn is not None and not allowed_fn():
+            mcp.pop(name, None)
+            continue
         if "invocation_fn" in spec:
             cmd, args = spec["invocation_fn"]()
         else:
@@ -1636,6 +1664,10 @@ def _refresh_dynamic_fields(config: dict) -> None:
     mcp = config.setdefault("mcpServers", {})
     registry_mode = _mcp_registry_mode()
     for name, spec in _MANAGED_MCP_SERVERS.items():
+        allowed_fn = spec.get("spec_allowed_fn")
+        if allowed_fn is not None and not allowed_fn():
+            mcp.pop(name, None)
+            continue
         is_new = name not in mcp
         entry = mcp.setdefault(name, {})
         if "invocation_fn" in spec:
