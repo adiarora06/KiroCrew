@@ -598,7 +598,7 @@ Nothing the fork controls can influence these reviews:
   allowlist, plus short-lived Bedrock-only OIDC credentials, bound the blast radius
   of any prompt injection.
 
-**`fork-workflow-guard.yml`** blocks a fork PR that modifies anything under
+**`fork-workflow-guard.yml`** posts an advisory failure when a fork PR modifies anything under
 `.github/**`, the vector a fork would use to fake basic-CI results (rewrite `ci.yml`
 to pass) or tamper with CODEOWNERS. It is deterministic on purpose: "does the diff
 touch `.github/**`" is a file-path check, so a grep on the authentic changed-file
@@ -609,6 +609,11 @@ cannot disable it, and a fork's own `pull_request` runs have no `checks: write` 
 forge its verdict. A maintainer who has reviewed a legitimate workflow change applies
 the `allow-fork-workflow-change` label and the guard re-evaluates green; the label is
 stripped on a new revision, so the override cannot carry over.
+
+The guard is not a required status check and PR Readiness does not aggregate it.
+Merge enforcement instead comes from the maintainer-approval policy for fork
+workflow runs and the catch-all CODEOWNERS rule, which requires a code-owner review
+for workflow files just as it does for every other path.
 
 ## Over-engineering resistance
 

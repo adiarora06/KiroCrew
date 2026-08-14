@@ -93,6 +93,16 @@ def _shell_function(script: str, function_name: str) -> str:
     return "\n".join(lines[start : end + 1])
 
 
+def test_fork_workflow_guard_describes_its_advisory_role() -> None:
+    guard = _workflow("fork-workflow-guard.yml")
+    codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+
+    assert "This check-run is advisory" in guard
+    assert "catch-all CODEOWNERS rule" in guard
+    assert "required, blocking check" not in guard
+    assert re.search(r"^\*\s+@kirodotdev/kirocrew-team$", codeowners, re.MULTILINE)
+
+
 class TestHumanOverrideHandler:
     def test_handler_runs_from_trusted_issue_comment_context(self) -> None:
         workflow = _workflow("ai-review-human-override.yml")

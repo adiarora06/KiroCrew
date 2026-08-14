@@ -16,8 +16,9 @@ name: Fork Workflow-Change Guard
 #
 # OVERRIDE: a maintainer who has reviewed a legitimate workflow change applies
 # the `allow-fork-workflow-change` label; the guard then re-evaluates green.
-# Complements a CODEOWNERS rule on `.github/workflows/**` (which forces review;
-# this enforces it as a required, blocking check).
+# This check-run is advisory. Enforcement comes from GitHub's maintainer approval
+# requirement for fork workflow runs and the catch-all CODEOWNERS rule, which
+# requires a KiroCrew code-owner review for every change, including workflows.
 
 on:
   workflow_run:
