@@ -82,6 +82,33 @@ describe('SideChat oversize-question refusal', () => {
     expect(screen.queryByText(/bytes?/i)).toBeNull()
   })
 
+  it('refuses an ASCII question with the full byte budget as the character target', async () => {
+    // ASCII costs exactly 1 UTF-8 byte per character, so the density-derived target
+    // for a pure-ASCII overflow is the full byte budget — unlike the old fixed
+    // 4-bytes/char floor, which told an ASCII user to cut to ~8,192 characters when
+    // trimming a single character would already fit.
+    const box = render('a'.repeat(32_769))
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await settle()
+    expect(sideTurn).not.toHaveBeenCalled()
+    expect(
+      screen.getByText('Question too long — reduce to under ~32,768 characters (yours: 32,769)'),
+    ).toBeInTheDocument()
+  })
+
+  it('refuses a zh-CN question with a density-derived target between the ASCII and emoji floors', async () => {
+    // CJK ideographs cost 3 UTF-8 bytes each — the density target sits between the
+    // ASCII (1 byte/char, full budget) and emoji (4 bytes/char, ~8,192) cases,
+    // which the old fixed floor could never report since it only knew the worst case.
+    const box = render('中'.repeat(10_923))
+    fireEvent.keyDown(box, { key: 'Enter' })
+    await settle()
+    expect(sideTurn).not.toHaveBeenCalled()
+    expect(
+      screen.getByText('Question too long — reduce to under ~10,922 characters (yours: 10,923)'),
+    ).toBeInTheDocument()
+  })
+
   it('still sends a question under the byte budget', async () => {
     // The control: proves this harness CAN reach `sideTurn`, so the negatives above
     // failing to are the guard working rather than the test never getting there.

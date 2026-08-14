@@ -4,6 +4,16 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Side-panel oversize-question refusal now reports an accurate character
+  target for every script, not just emoji.** The refusal derived its
+  character count from a fixed worst-case floor (4 bytes/char, the emoji
+  case), so an ASCII user over the byte budget was told to cut to ~8,192
+  characters when trimming a single character would do (4x over-deletion),
+  and a zh-CN user (3 bytes/char) was told 8,192 when ~10,922 actually fit.
+  The target is now derived from the submitted question's own byte density,
+  so it's accurate per script — the all-emoji case is unaffected (it already
+  sat at the 4-byte floor). (#3432)
+
 - **The skill browser no longer serves a different skill than the one you asked
   for.** Three `package/` lookups compared a bare leaf name and returned the
   first hit, so a request for `package/<name>` could answer with a file under
