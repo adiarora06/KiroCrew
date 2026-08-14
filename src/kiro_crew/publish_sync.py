@@ -600,6 +600,54 @@ async def push_version_by_slug(slug: str, *, force: bool = False) -> None:
         await push_version(art, force=force)
 
 
+#: Marker (at the artifact store's root) that :func:`republish_widgets_dropping_unsafe_eval`
+#: has already swept once for this install. Named for the specific remediation
+#: rather than generically, since a future wrapper change needs its own sweep
+#: (or the more durable option 2 from the originating issue: a wrapper-revision
+#: marker embedded in the document and compared in upstream_status).
+_UNSAFE_EVAL_REPUBLISH_MARKER = ".unsafe-eval-republished"
+
+
+async def republish_widgets_dropping_unsafe_eval() -> None:
+    """One-time remediation: force-repush every already-published ``widget``
+    artifact so its live document picks up ``wrap_widget_html``'s current,
+    ``'unsafe-eval'``-free CSP.
+
+    ``push_version`` only re-renders on a KiroCrew version bump (the 1:1
+    version invariant), so a widget published before ``wrap_widget_html``
+    dropped ``'unsafe-eval'`` and never edited again keeps serving the old CSP
+    indefinitely — the exposure stays open on exactly the artifacts that are
+    already public, and the remediation is otherwise invisible for them.
+
+    Runs once per install, gated by a marker file at the artifact store's
+    root, rather than on every gateway start: ``push_version`` is already
+    best-effort (never raises; a provider failure is recorded on
+    ``publication.last_error`` and does not propagate), so retrying a
+    persistently-failing artifact (a provider outage, a since-deleted
+    publication) on every restart would just be repeated wasted network calls
+    for no better outcome — an artifact that fails here still gets a normal
+    retry the next time it is actually edited, same as any other push
+    failure. The marker is written after one sweep attempt regardless of
+    per-artifact outcome, matching that "one-time" framing.
+    """
+    store = get_default_store()
+    marker = store.root / _UNSAFE_EVAL_REPUBLISH_MARKER
+    if await asyncio.to_thread(marker.exists):
+        return
+    widgets = await asyncio.to_thread(store.list, kind="widget")
+    published = [a for a in widgets if a.publication is not None and a.publication.auto_sync]
+    for art in published:
+        try:
+            await push_version(art, force=True)
+        except Exception:  # pragma: no cover — push_version is already best-effort
+            logger.exception("unsafe-eval republish: unexpected failure for %s", art.slug)
+    await asyncio.to_thread(marker.write_text, "done\n", encoding="utf-8")
+    if published:
+        logger.info(
+            "unsafe-eval republish: re-pushed %d already-published widget(s)", len(published)
+        )
+
+
 async def update_sharing(
     slug: str, *, visibility: str, shared_with: list[str] | None = None
 ) -> dict[str, object]:

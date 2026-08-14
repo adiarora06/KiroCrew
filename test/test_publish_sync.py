@@ -349,6 +349,109 @@ async def test_push_version_noop_when_not_published(store, fake_client):
     assert fake_client.called("upload_version") == []
 
 
+# ── republish_widgets_dropping_unsafe_eval ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_republish_forces_a_repush_of_published_widgets(store, fake_client):
+    # Regression for #3373: a widget published before wrap_widget_html dropped
+    # 'unsafe-eval' and never edited again would otherwise keep serving the old
+    # CSP forever, since push_version only re-renders on a version bump.
+    store.create(name="W", content="<h1>hi</h1>", kind="widget", slug="w")
+    await publish_sync.publish("w")  # last_synced_kirocrew_version = 1, no new version since
+    fake_client.calls.clear()
+
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+
+    assert len(fake_client.called("upload_version")) == 1
+    assert store.get("w").publication.last_error == ""
+
+
+@pytest.mark.asyncio
+async def test_republish_ignores_non_widget_and_unpublished_artifacts(store, fake_client):
+    store.create(name="Doc", content="text", kind="text", slug="txt")
+    await publish_sync.publish("txt")
+    store.create(name="Draft", content="<p>x</p>", kind="widget", slug="draft")  # never published
+    fake_client.calls.clear()
+
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+
+    assert fake_client.called("upload_version") == []
+
+
+@pytest.mark.asyncio
+async def test_republish_is_one_time_only(store, fake_client):
+    store.create(name="W", content="<h1>hi</h1>", kind="widget", slug="w")
+    await publish_sync.publish("w")
+    fake_client.calls.clear()
+
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+    assert len(fake_client.called("upload_version")) == 1
+
+    # A second sweep (e.g. the next gateway restart) is a no-op: the marker
+    # from the first sweep is already on disk.
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+    assert len(fake_client.called("upload_version")) == 1
+
+    # A widget published AFTER the first sweep is also never swept again --
+    # this is a one-time remediation, not an ongoing marker check (that's the
+    # "more durable" option the originating issue deferred).
+    store.create(name="W2", content="<h1>hi 2</h1>", kind="widget", slug="w2")
+    await publish_sync.publish("w2")
+    fake_client.calls.clear()
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+    assert fake_client.called("upload_version") == []
+
+
+@pytest.mark.asyncio
+async def test_republish_writes_a_marker_at_the_store_root(store, fake_client):
+    store.create(name="W", content="<h1>hi</h1>", kind="widget", slug="w")
+    await publish_sync.publish("w")
+
+    marker = store.root / publish_sync._UNSAFE_EVAL_REPUBLISH_MARKER
+    assert not marker.exists()
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+    assert marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_republish_writes_marker_even_with_no_published_widgets(store, fake_client):
+    # No widgets at all -- still marks the sweep done so an empty install
+    # doesn't re-scan its (empty) artifact store on every future restart.
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+    assert (store.root / publish_sync._UNSAFE_EVAL_REPUBLISH_MARKER).exists()
+    assert fake_client.called("upload_version") == []
+
+
+@pytest.mark.asyncio
+async def test_republish_continues_past_an_unexpected_push_failure(store, fake_client, monkeypatch):
+    # push_version itself is already best-effort against ordinary provider
+    # errors (records last_error, never raises) -- what this guards is an
+    # UNEXPECTED exception from push_version, which must still not abort the
+    # sweep before it reaches the remaining artifacts or writes the marker.
+    store.create(name="Bad", content="<p>bad</p>", kind="widget", slug="bad")
+    await publish_sync.publish("bad")
+    store.create(name="Good", content="<p>good</p>", kind="widget", slug="good")
+    await publish_sync.publish("good")
+    fake_client.calls.clear()
+
+    real_push_version = publish_sync.push_version
+
+    async def flaky_push_version(art, *, force=False):
+        if art.slug == "bad":
+            raise RuntimeError("boom")
+        return await real_push_version(art, force=force)
+
+    monkeypatch.setattr(publish_sync, "push_version", flaky_push_version)
+
+    await publish_sync.republish_widgets_dropping_unsafe_eval()
+
+    # "good" was still reached and pushed despite "bad" raising.
+    assert len(fake_client.called("upload_version")) == 1
+    # And the sweep still completed (didn't abort before the marker write).
+    assert (store.root / publish_sync._UNSAFE_EVAL_REPUBLISH_MARKER).exists()
+
+
 # ── sharing ────────────────────────────────────────────────────────────────────
 
 

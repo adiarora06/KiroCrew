@@ -235,6 +235,18 @@ forwards it as `?pageToken=`, and `RemoteBrowseSection` drives a
 `useInfiniteQuery` with a "Load more" control — so remote artifacts past the
 provider's first page are reachable rather than silently truncated.
 
+**One-time widget CSP remediation.** `push_version` only re-renders a
+publication on a KiroCrew version bump (the 1:1 version invariant), so a
+`wrap_widget_html` change (e.g. dropping `'unsafe-eval'`) has no effect on a
+widget already published and never edited again — the live document keeps
+serving the old wrapper indefinitely. `publish_sync.republish_widgets_dropping_unsafe_eval`,
+fired as a tracked background task on gateway startup
+(`dashboard/server.py`'s `_register_widget_republish_hook`) and gated by a
+marker file at the artifact store's root, force-repushes every already-published
+`widget` artifact exactly once per install to close that gap for existing
+publications. See the function's own docstring for why this is a one-shot
+sweep rather than a persistent retry loop.
+
 ### Dashboard pages
 
 - `/artifacts` — list page (name / kind / tags / updated_at), tag filter,

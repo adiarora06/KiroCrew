@@ -4,6 +4,16 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Published widgets no longer keep the old `'unsafe-eval'` CSP forever.**
+  `wrap_widget_html` stopped emitting `'unsafe-eval'` and the Tailwind Play
+  CDN, but `push_version` only re-renders a publication on a version bump —
+  so a widget published before that change and never edited again kept
+  serving the old CSP indefinitely, with the exposure staying open on exactly
+  the artifacts that are already public. The gateway now force-repushes
+  every already-published widget once per install on startup (a background
+  task, so it never delays the port bind) to close the gap for existing
+  publications. (#3373)
+
 - **The skill browser no longer serves a different skill than the one you asked
   for.** Three `package/` lookups compared a bare leaf name and returned the
   first hit, so a request for `package/<name>` could answer with a file under

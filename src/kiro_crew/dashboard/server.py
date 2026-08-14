@@ -1789,6 +1789,32 @@ def _register_instances_hooks(app: web.Application, state: DashboardState, port:
     app.on_cleanup.append(_instances_shutdown)
 
 
+def _register_widget_republish_hook(app: web.Application, state: DashboardState) -> None:
+    """One-time sweep: re-push every already-published widget artifact so it
+    picks up ``wrap_widget_html``'s current CSP (see
+    ``publish_sync.republish_widgets_dropping_unsafe_eval``'s own docstring for
+    why this cannot wait for a normal edit-triggered push).
+
+    Fired as a tracked background task, not awaited inline: it may make one
+    provider network call per already-published widget, so awaiting it here
+    would gate the port bind on however many publications exist and however
+    the provider is currently answering — same reasoning as the Instances
+    tunnel revive below (``_register_instances_hooks``). The function itself
+    is idempotent (marker-gated), so a task that is still running at shutdown
+    and never gets to write the marker just resumes the sweep on the next
+    start.
+    """
+
+    async def _widget_republish_startup(app_: web.Application) -> None:
+        from kiro_crew.publish_sync import republish_widgets_dropping_unsafe_eval
+
+        task = asyncio.create_task(republish_widgets_dropping_unsafe_eval())
+        state._background_tasks.add(task)
+        task.add_done_callback(state._background_tasks.discard)
+
+    app.on_startup.append(_widget_republish_startup)
+
+
 def build_host_canonical_redirect(canonical_host: str) -> Any:
     """Build the loopback-host-canonicalization middleware.
 
@@ -2838,6 +2864,7 @@ async def start_dashboard(
     # ``runner.setup()`` freezes the app's signal lists. See
     # ``_register_instances_hooks`` for why ordering matters.
     _register_instances_hooks(app, state, port)
+    _register_widget_republish_hook(app, state)
     _register_browser_view_cleanup(app)
 
     # Unix-socket cleanup hook — registered before runner.setup freezes the

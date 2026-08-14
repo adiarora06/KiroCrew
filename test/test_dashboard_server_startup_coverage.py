@@ -313,6 +313,54 @@ async def _cancel_stray_tasks() -> None:
         await asyncio.gather(*stray, return_exceptions=True)
 
 
+# ── _register_widget_republish_hook ──────────────────────────────────────
+#
+# The one-time #3373 CSP-remediation sweep. Same registration-ordering
+# requirement as _register_instances_hooks (attached before runner.setup()
+# freezes the signal lists) and the same reason for firing as a tracked
+# background task rather than an awaited one: it may make one provider
+# network call per already-published widget, so gating the port bind on it
+# would delay startup by however many publications exist.
+
+
+class TestRegisterWidgetRepublishHook:
+    def _state(self):
+        from kiro_crew.dashboard.state import DashboardState
+
+        return DashboardState(
+            sessions=MagicMock(), crons=MagicMock(), lessons=MagicMock(), start_time=0.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_registering_before_freeze_does_not_raise(self) -> None:
+        app = web.Application()
+        state = self._state()
+        srv._register_widget_republish_hook(app, state)
+        app.freeze()  # must not raise "Cannot modify frozen list"
+
+    @pytest.mark.asyncio
+    async def test_fires_a_self_cleaning_background_task_on_startup(self, monkeypatch) -> None:
+        import kiro_crew.publish_sync as publish_sync
+
+        called = asyncio.Event()
+
+        async def fake_republish() -> None:
+            called.set()
+
+        monkeypatch.setattr(publish_sync, "republish_widgets_dropping_unsafe_eval", fake_republish)
+
+        app = web.Application()
+        state = self._state()
+        srv._register_widget_republish_hook(app, state)
+
+        async with TestClient(TestServer(app)):
+            await asyncio.wait_for(called.wait(), timeout=2)
+            # Let the task's own add_done_callback run before asserting cleanup.
+            await asyncio.sleep(0)
+
+        assert state._background_tasks == set()
+
+
 class TestStartDashboardWiring:
     @pytest.mark.asyncio
     async def test_the_app_is_wired_and_reports_ready(self, tmp_path, monkeypatch) -> None:
