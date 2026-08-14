@@ -1366,7 +1366,18 @@ Examples:
         "policy", help="Inspect the governance security policy + profiles"
     )
     policy_sub = policy_parser.add_subparsers(dest="policy_action")
-    policy_sub.add_parser("show", help="Show the effective enterprise security policy")
+    policy_show = policy_sub.add_parser("show", help="Show the effective enterprise security policy")
+    policy_show.add_argument(
+        "--ids",
+        action="store_true",
+        # NOT named --verbose: the top-level parser already defines --verbose/-v
+        # as an int `count` (log level). A same-named store_true on this
+        # subparser would collide in the merged Namespace via argparse's
+        # parent/subparser default-override gotcha (see the --no-jail comment
+        # above) -- whichever parser's default applies last silently
+        # overwrites the other's value.
+        help="List each denied-command category's rule ids (default: counts only)",
+    )
     policy_sub.add_parser("validate", help="Validate the policy + all profiles (load-check)")
     explain_parser = policy_sub.add_parser(
         "explain", help="Explain a tool/scope decision for a surface"

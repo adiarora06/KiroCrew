@@ -284,6 +284,17 @@ All notable changes to KiroCrew are documented in this file.
   writes still audit as `dashboard`; the caller header alone grants nothing.
   (#3503)
 
+- **`kirocrew policy show` no longer hides the 139 built-in denied-command
+  rules from the agent.** The rules are visible and configurable to the
+  user (Settings → Security), but the agent's only way to discover them was
+  to attempt a command and be refused — so it could plan multi-step work
+  that turned out to be impossible from the first step, walking the user
+  through setup effort (e.g. exporting AWS credentials) for a task a
+  hard-denied command would block later anyway. `policy show` now prints
+  the rule count grouped by category on every install, enterprise policy or
+  not; `--ids` lists each category's rule ids for citing a specific rule
+  when relaying a refusal. (#3454)
+
 - **Side-panel oversize-question refusal now reports an accurate character
   target for every script, not just emoji.** The refusal derived its
   character count from a fixed worst-case floor (4 bytes/char, the emoji

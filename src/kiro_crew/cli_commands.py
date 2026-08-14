@@ -18,6 +18,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +65,7 @@ from kiro_crew.hooks import safe_read_file
 from kiro_crew.learn import Lesson, LessonStore
 from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.security import (
+    BUILTIN_DENIED_RULES,
     BUILTIN_DENY_PATTERNS,
     is_sensitive_path,
     redact,
@@ -1166,6 +1168,40 @@ def _security(args: argparse.Namespace) -> None:
         print("Usage: kirocrew security {audit|deny-list|events|verify}")
 
 
+def _print_denied_command_summary(*, ids: bool) -> None:
+    """Print the built-in denied-command catalog as grouped counts (or, with
+    ``--ids``, each category's rule ids).
+
+    The 139 built-in rules are visible and configurable to the USER (Settings
+    → Security renders them in category accordions, backed by
+    ``GET /api/security/denied-commands``) but were invisible to the AGENT --
+    ``policy show`` reported everything except them, so an agent planning a
+    multi-step task had no way to learn a class of work is hard-denied before
+    committing to a plan that turns out to be impossible. See issue #3454.
+
+    Deliberately just counts + ids, not the full 139 regex patterns: enough
+    for planning ("this class of work is blocked") and for citing a rule id
+    when relaying a refusal, without bloating the output the way dumping
+    every pattern would.
+    """
+    by_category: dict[str, list] = {}
+    for rule in BUILTIN_DENIED_RULES:
+        by_category.setdefault(rule.category, []).append(rule)
+    counts = Counter({cat: len(rules) for cat, rules in by_category.items()})
+    print(
+        f"   • commands.denied: {len(BUILTIN_DENIED_RULES)} rules "
+        f"in {len(by_category)} categories"
+    )
+    if ids:
+        for cat, rules in sorted(by_category.items(), key=lambda kv: -len(kv[1])):
+            rule_ids = ", ".join(r.id for r in rules)
+            print(f"       {cat}({len(rules)}): {rule_ids}")
+    else:
+        summary = " ".join(f"{cat}({n})" for cat, n in counts.most_common())
+        print(f"       {summary}")
+        print("     (add --ids for rule ids, or see Settings → Security)")
+
+
 def _policy(args: argparse.Namespace) -> None:
     """Governance policy + profile inspection (read-only; safe to expose to LLM).
 
@@ -1191,6 +1227,7 @@ def _policy(args: argparse.Namespace) -> None:
     if action == "show":
         if ceiling is None:
             print("No enterprise security policy is active (editable secure-defaults).")
+            _print_denied_command_summary(ids=getattr(args, "ids", False))
             return
         # Report the PROVEN provenance, not the claimed one: printing a bare
         # issuer implied a trust decision nothing had made.  signature_summary()
@@ -1206,6 +1243,7 @@ def _policy(args: argparse.Namespace) -> None:
             print("   (no governed scopes)")
         for scope in sorted(ceiling.controls):
             print(f"   • {scope}: {ceiling.controls[scope]}")
+        _print_denied_command_summary(ids=getattr(args, "ids", False))
 
     elif action == "validate":
         ok = True
