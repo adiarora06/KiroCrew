@@ -159,10 +159,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD: ${{ steps.pr.outputs.head_sha }}
+          PR: ${{ steps.pr.outputs.pr }}
         run: |
           set -uo pipefail
           id="$(gh api --method POST "repos/$REPO/check-runs" \
             -f name="GPT 5.6 Review" -f head_sha="$HEAD" -f status="in_progress" \
+            -f external_id="gpt-review-pr-$PR" \
             --jq '.id')"
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
@@ -712,6 +714,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD: ${{ steps.pr.outputs.head_sha || github.event.workflow_run.head_sha }}
+          PR: ${{ steps.pr.outputs.pr }}
           CHECK_ID: ${{ steps.check.outputs.id }}
         run: |
           set -uo pipefail
@@ -723,15 +726,38 @@ jobs:
               conclusion="success"; title="no blocking findings"
             fi
           fi
+          summary="Fork AI review for $HEAD. See the PR comment for details."
+          complete() {
+            for attempt in 1 2; do
+              if gh api --method PATCH "repos/$REPO/check-runs/$1" \
+                -f status="completed" -f conclusion="$2" \
+                -f "output[title]=GPT 5.6 Review — $3" \
+                -f "output[summary]=$summary" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "::warning::could not complete check-run $1 for $HEAD"
+            return 1
+          }
           if [ -n "${CHECK_ID:-}" ]; then
-            gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" \
-              -f status="completed" -f conclusion="$conclusion" \
-              -f "output[title]=GPT 5.6 Review — $title" \
-              -f "output[summary]=Fork AI review for $HEAD. See the PR comment for details." >/dev/null || true
+            complete "$CHECK_ID" "$conclusion" "$title" || true
           elif [ -n "${HEAD:-}" ]; then
             gh api --method POST "repos/$REPO/check-runs" \
               -f name="GPT 5.6 Review" -f head_sha="$HEAD" \
               -f status="completed" -f conclusion="failure" \
               -f "output[title]=GPT 5.6 Review — could not run" \
               -f "output[summary]=The fork GPT review job failed before producing a verdict; re-run it." >/dev/null || true
+          fi
+          if [ -n "${HEAD:-}" ] && [ -n "${PR:-}" ]; then
+            enc="$(jq -rn '\"GPT 5.6 Review\" | @uri')"
+            stranded="$(gh api --method GET \
+              "repos/$REPO/commits/$HEAD/check-runs?check_name=$enc&per_page=100" \
+              --jq ".check_runs[]
+                    | select(.status != \"completed\")
+                    | select(.external_id == \"gpt-review-pr-$PR\")
+                    | .id" 2>/dev/null || true)"
+            for id in $stranded; do
+              complete "$id" "failure" "review incomplete" || true
+            done
           fi

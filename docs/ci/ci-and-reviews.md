@@ -582,6 +582,11 @@ named exactly like its same-repo twin (`Opus 4.8 Review`, `GPT 5.6 Review`,
 it opens that check-run as early as possible keyed to `head_sha` so a job that dies
 still leaves a fail-closed result.
 
+Every fork check-run is also tagged with the originating PR number. Finalization
+retries once, then reconciles any incomplete run for that same head and PR. This
+keeps a transient Checks API failure from leaving PR Readiness permanently pending,
+without completing a sibling PR's review when two PRs share a commit.
+
 Nothing the fork controls can influence these reviews:
 
 - `workflow_run` **always** runs the workflow definition from the **default branch**,

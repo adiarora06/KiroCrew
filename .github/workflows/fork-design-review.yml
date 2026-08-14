@@ -159,10 +159,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD: ${{ steps.pr.outputs.head_sha }}
+          PR: ${{ steps.pr.outputs.pr }}
         run: |
           set -uo pipefail
           id="$(gh api --method POST "repos/$REPO/check-runs" \
             -f name="Design Review" -f head_sha="$HEAD" -f status="in_progress" \
+            -f external_id="design-review-pr-$PR" \
             --jq '.id')"
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
@@ -557,6 +559,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD: ${{ steps.pr.outputs.head_sha || github.event.workflow_run.head_sha }}
+          PR: ${{ steps.pr.outputs.pr }}
           CHECK_ID: ${{ steps.check.outputs.id }}
           VERDICT: ${{ steps.verdict.outputs.verdict }}
         run: |
@@ -567,15 +570,38 @@ jobs:
             BLOCK)    conclusion="failure"; title="BLOCK — design concern (advisory)" ;;
             *)        conclusion="neutral"; title="review incomplete (advisory)" ;;
           esac
+          summary="Advisory fork design review for $HEAD. See the PR comment for details."
+          complete() {
+            for attempt in 1 2; do
+              if gh api --method PATCH "repos/$REPO/check-runs/$1" \
+                -f status="completed" -f conclusion="$2" \
+                -f "output[title]=Design Review — $3" \
+                -f "output[summary]=$summary" >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "::warning::could not complete check-run $1 for $HEAD"
+            return 1
+          }
           if [ -n "${CHECK_ID:-}" ]; then
-            gh api --method PATCH "repos/$REPO/check-runs/$CHECK_ID" \
-              -f status="completed" -f conclusion="$conclusion" \
-              -f "output[title]=Design Review — $title" \
-              -f "output[summary]=Advisory fork design review for $HEAD. See the PR comment for details." >/dev/null || true
+            complete "$CHECK_ID" "$conclusion" "$title" || true
           elif [ -n "${HEAD:-}" ]; then
             gh api --method POST "repos/$REPO/check-runs" \
               -f name="Design Review" -f head_sha="$HEAD" \
               -f status="completed" -f conclusion="neutral" \
               -f "output[title]=Design Review — could not run (advisory)" \
               -f "output[summary]=The fork design review job failed before producing a verdict; re-run it. Advisory — does not block merge." >/dev/null || true
+          fi
+          if [ -n "${HEAD:-}" ] && [ -n "${PR:-}" ]; then
+            enc="$(jq -rn '\"Design Review\" | @uri')"
+            stranded="$(gh api --method GET \
+              "repos/$REPO/commits/$HEAD/check-runs?check_name=$enc&per_page=100" \
+              --jq ".check_runs[]
+                    | select(.status != \"completed\")
+                    | select(.external_id == \"design-review-pr-$PR\")
+                    | .id" 2>/dev/null || true)"
+            for id in $stranded; do
+              complete "$id" "neutral" "review incomplete (advisory)" || true
+            done
           fi

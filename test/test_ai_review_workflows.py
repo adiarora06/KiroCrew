@@ -596,28 +596,43 @@ class TestFirstPrinciplesReview:
         # pr-readiness.yml counts ANY non-completed check-run of this name as
         # pending, so one swallowed finalize error would wedge the PR at
         # `checking` with no later event able to clear it.
-        finalize = _step_script(
-            _workflow("fork-first-principles-review.yml"), "Finalize check-run (advisory)"
-        )
-
-        assert "for attempt in 1 2; do" in finalize
-        assert "completing stranded check-run" in finalize
-        assert "::warning::could not complete check-run" in finalize
+        lanes = {
+            "fork-opus-review.yml": "Finalize check-run (fail closed)",
+            "fork-gpt-review.yml": "Finalize check-run (fail closed)",
+            "fork-design-review.yml": "Finalize check-run (advisory)",
+            "fork-ux-review.yml": "Finalize check-run (advisory)",
+            "fork-first-principles-review.yml": "Finalize check-run (advisory)",
+        }
+        for name, step in lanes.items():
+            finalize = _step_script(_workflow(name), step)
+            assert "for attempt in 1 2; do" in finalize
+            assert "check-runs?check_name=$enc&per_page=100" in finalize
+            assert "::warning::could not complete check-run" in finalize
 
     def test_sweep_only_completes_check_runs_this_pr_created(self) -> None:
         # Two open PRs can share a head commit, so a check-run of this name on this
         # head may belong to a DIFFERENT pull request -- completing it would publish
         # a verdict computed from another diff. The wedge fix is therefore scoped by
         # external_id, so it can never reach a sibling's review.
-        workflow = _workflow("fork-first-principles-review.yml")
-        opened = _step_script(workflow, "Open check-run (in progress)")
-        finalize = _step_script(workflow, "Finalize check-run (advisory)")
+        lanes = {
+            "fork-opus-review.yml": ("Finalize check-run (fail closed)", "opus-review-pr-$PR"),
+            "fork-gpt-review.yml": ("Finalize check-run (fail closed)", "gpt-review-pr-$PR"),
+            "fork-design-review.yml": ("Finalize check-run (advisory)", "design-review-pr-$PR"),
+            "fork-ux-review.yml": ("Finalize check-run (advisory)", "ux-review-pr-$PR"),
+            "fork-first-principles-review.yml": (
+                "Finalize check-run (advisory)",
+                "first-principles-pr-$PR",
+            ),
+        }
+        for name, (step, external_id) in lanes.items():
+            workflow = _workflow(name)
+            opened = _step_script(workflow, "Open check-run (in progress)")
+            finalize = _step_script(workflow, step)
 
-        assert '-f external_id="first-principles-pr-$PR"' in opened
-        assert 'select(.external_id == \\"first-principles-pr-$PR\\")' in finalize
-        assert '[ -n "${PR:-}" ]' in finalize
-        # An unscoped sweep must not come back.
-        assert 'select(.status != "completed") | .id' not in finalize
+            assert f'-f external_id="{external_id}"' in opened
+            assert f'select(.external_id == \\"{external_id}\\")' in finalize
+            assert '[ -n "${PR:-}" ]' in finalize
+            assert 'select(.status != "completed") | .id' not in finalize
 
     def test_review_text_is_gated_on_credential_shapes(self) -> None:
         # The reviewer has read-only tools, no shell and no network, so the review
