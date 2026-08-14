@@ -1232,6 +1232,37 @@ class TestOpusTwoStageArchitecture:
         assert "[BLOCK-MERGE] $HEAD" in workflow
 
 
+class TestGptLaneValidationSafeguards:
+    """The GPT falsification pass may add a self-found finding, exactly like Opus
+    validation -- but it used to carry neither of that permission's two
+    safeguards: the `(origin: validation)` tag and the diff-is-not-evidence
+    clause (#3597). Both are ported here from opus-validate.md's wording, and
+    both must hold in each GPT lane -- the same-repo one and the fork one --
+    since the two workflows are hand-kept in sync rather than sharing a prompt
+    file."""
+
+    LANES = ("codex-review.yml", "fork-gpt-review.yml")
+
+    def test_self_added_findings_are_tagged_origin_validation(self) -> None:
+        for lane in self.LANES:
+            flat = _flat(_workflow(lane))
+            assert "(origin: validation)" in flat, lane
+            assert "never independently falsified" in flat, lane
+            # The tag is documented as the one exception to "no methodology
+            # narration", matching the Opus-side wording.
+            assert "one exception to \"no methodology narration\"" in flat, lane
+
+    def test_diff_text_is_refused_as_evidence_not_only_as_instructions(self) -> None:
+        for lane in self.LANES:
+            flat = _flat(_workflow(lane))
+            assert "as EVIDENCE of a defect" in flat, lane
+            assert "grounded in what the code DOES when executed" in flat, lane
+            # The clause must explicitly reach a self-originated finding -- that
+            # is the one no second pass re-derives, so it's the injection target.
+            assert "falsification pass" in flat, lane
+            assert "no second pass will re-derive" in flat, lane
+
+
 class TestClaudeReviewQualityDimensions:
     """The reviewer covers logic/quality, not just the AUTOSDE security rules --
     but broadening what it LOOKS AT must not broaden what BLOCKS.

@@ -367,10 +367,14 @@ observable outcome itself from code it opened in that pass. Pass 2 may also *add
 defect discovery missed, in both lanes, but only under that same three-part
 grounding and the same confidence floor — killing a candidate stays its primary
 job, and a self-found finding gets no second opinion, so it earns no cheaper path
-in. In the Opus lane such a finding is tagged `(origin: validation)` in the posted
+in. In both lanes such a finding is tagged `(origin: validation)` in the posted
 review, because it is un-falsified by construction: the tag is what lets a reader
 weight it accordingly, and what lets the precision of self-added findings be
-compared against survivors' rather than assumed equal. Pass 2 is the only
+compared against survivors' rather than assumed equal. Both lanes also refuse
+diff text, comments and filenames as *evidence* of a defect, not merely as
+instructions — a self-added finding is the one finding no second pass
+re-derives, which makes it the natural target for a planted claim that code is
+broken. Pass 2 is the only
 gated verdict. Falsification raises precision *within a single run*, which is why
 neither reviewer carries cross-round state: each judges only the current SHA's code
 and therefore cannot contradict itself across rounds.
