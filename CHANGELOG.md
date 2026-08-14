@@ -4,6 +4,19 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **A lesson from a previous embedding-model generation could no longer get
+  silently deleted or offered as a false contradiction.** `write_lesson`'s
+  semantic dedup and `find_contradiction_candidates` compared raw embeddings
+  with a cosine helper that silently truncated a dimension mismatch to the
+  shorter vector instead of rejecting it, so a row embedded at a different
+  dimensionality (e.g. left over from an old embedding model) could score a
+  plausible-looking ~0.5 similarity against an unrelated new rule — landing
+  either past the 0.85 dedup line (deleting the old lesson as a "duplicate")
+  or inside the [0.4, 0.85) contradiction band (offered as a false
+  contradiction candidate). Both paths now converge onto the same
+  dimension-checked, float64-precision scorer the ranking paths already use,
+  which also removes a per-row query re-derivation from both loops. (#3466)
+
 - **Side-panel oversize-question refusal now reports an accurate character
   target for every script, not just emoji.** The refusal derived its
   character count from a fixed worst-case floor (4 bytes/char, the emoji

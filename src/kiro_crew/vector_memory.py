@@ -1129,7 +1129,11 @@ class VectorMemoryStore:
                 # population is real — legacy rows stay NULL until the backfill
                 # sweep or a re-write reaches them — so score them on the same
                 # weighted scale as embedded rows (see _hybrid_score).
-                vec_score = similarity(r)
+                # Clamped here (not inside the scorer): this caller passes
+                # query_has_vector=True below, so a negative raw cosine would
+                # otherwise reach _hybrid_score's weighted sum instead of the
+                # keyword-only floor a merely-dissimilar row should get.
+                vec_score = max(0.0, similarity(r))
 
                 score = _hybrid_score(
                     kw_score, vec_score, query_has_vector=query_embedding is not None
@@ -2193,6 +2197,10 @@ class VectorMemoryStore:
             matched = True
             break
 
+        # Built once for the whole scan (query-side vector + norm are the same
+        # for every row) rather than per candidate — see _stored_similarity_scorer.
+        similarity = self._stored_similarity_scorer(rule_emb) if rule_emb else None
+
         for existing in [] if matched else lesson_rows:
             existing_val = _as_text(existing)
             if existing_val is None:
@@ -2225,19 +2233,15 @@ class VectorMemoryStore:
                         continue
 
             # Semantic dedup via embeddings (use stored embedding when available)
-            if rule_emb:
+            if similarity is not None:
                 existing_emb_blob = existing.get("embedding")
+                row_blob: bytes | None = None
                 if (
                     existing_emb_blob
                     and isinstance(existing_emb_blob, bytes)
                     and len(existing_emb_blob) >= 4
                 ):
-                    try:
-                        existing_emb = list(
-                            struct.unpack(f"{len(existing_emb_blob) // 4}f", existing_emb_blob)
-                        )
-                    except struct.error:
-                        existing_emb = None
+                    row_blob = existing_emb_blob
                 elif self.embed_fn and backfills_done < _MAX_BACKFILLS_PER_CALL:
                     # Lazy backfill: compute embedding for legacy lessons (count even on failure)
                     # Sampled BEFORE the embed: _try_embed returns None when a swap
@@ -2247,15 +2251,13 @@ class VectorMemoryStore:
                     backfill_generation = self._space_generation
                     existing_emb = self._try_embed(existing_val, PRIORITY_BULK)
                     if existing_emb:
-                        blob = struct.pack(f"{len(existing_emb)}f", *existing_emb)
+                        row_blob = struct.pack(f"{len(existing_emb)}f", *existing_emb)
                         pending_backfills.append(
-                            (blob, existing["key"], backfill_generation)
+                            (row_blob, existing["key"], backfill_generation)
                         )
                     backfills_done += 1
-                else:
-                    existing_emb = None
-                if existing_emb:
-                    sim = self._cosine_sim(rule_emb, existing_emb)
+                if row_blob is not None:
+                    sim = similarity({"embedding": row_blob})
                     if sim > 0.85:
                         logger.info("Lesson semantic dedup: %.2f sim with %r", sim, existing["key"])
                         if len(rule) > len(existing_val):
@@ -2351,22 +2353,15 @@ class VectorMemoryStore:
             rule_emb = self._try_embed(rule) if self.embed_fn else None
         if not rule_emb:
             return []
+        # Builds the query-side work (vector + its norm) once for the whole scan,
+        # same reasoning as _rank_lessons / get_semantic_context. A row with no
+        # stored embedding, or one at a different dimensionality, scores 0.0 —
+        # which threshold_low's default of 0.4 already excludes without an
+        # explicit skip.
+        similarity = self._stored_similarity_scorer(rule_emb)
         candidates = []
         for existing in self.get_lessons():
-            existing_emb_blob = existing.get("embedding")
-            if (
-                not existing_emb_blob
-                or not isinstance(existing_emb_blob, bytes)
-                or len(existing_emb_blob) < 4
-            ):
-                continue
-            try:
-                existing_emb = list(
-                    struct.unpack(f"{len(existing_emb_blob) // 4}f", existing_emb_blob)
-                )
-            except struct.error:
-                continue
-            sim = self._cosine_sim(rule_emb, existing_emb)
+            sim = similarity(existing)
             if threshold_low <= sim < threshold_high:
                 existing_val = str(json.loads(existing["value_json"]))
                 candidates.append({"key": existing["key"], "rule": existing_val, "similarity": sim})
@@ -2505,6 +2500,18 @@ class VectorMemoryStore:
         A row whose vector has a different dimensionality is incomparable and
         scores 0.0 rather than being truncated against the query, matching
         ``_sqlite_vector_search`` and ``HybridRetriever._cosine_similarity``.
+
+        The raw (possibly negative) cosine value is returned uncapped — a
+        ranking caller that never distinguishes "no vector" (0.0) from
+        "opposite direction" (negative) should clamp at its own call site
+        (``max(0.0, ...)``); a threshold caller comparing the value against a
+        band that may include non-positive bounds needs the true value. The
+        numpy path promotes both operands to float64 before the norm and the
+        dot product: the stored blob is float32 on disk, and accumulating a
+        many-dimensional norm/dot in float32 lands ~1e-7 away from the plain
+        ``_cosine_sim`` this scorer replaces — irrelevant when only sorting,
+        not irrelevant when the value is compared against a fixed threshold
+        like the semantic-dedup line.
         """
         if not query_emb:
             return lambda row: 0.0
@@ -2512,7 +2519,7 @@ class VectorMemoryStore:
         q_bytes = q_len * 4
 
         if _HAS_NUMPY:
-            q_vec = np.asarray(query_emb, dtype=np.float32)
+            q_vec = np.asarray(query_emb, dtype=np.float64)
             q_norm = float(np.linalg.norm(q_vec))
             if not q_norm:
                 return lambda row: 0.0
@@ -2521,9 +2528,9 @@ class VectorMemoryStore:
                 blob = row.get("embedding")
                 if not isinstance(blob, bytes) or len(blob) != q_bytes:
                     return 0.0
-                vec = np.frombuffer(blob, dtype=np.float32)
+                vec = np.frombuffer(blob, dtype=np.float32).astype(np.float64)
                 denom = float(np.linalg.norm(vec)) * q_norm
-                return max(0.0, float(vec @ q_vec) / denom) if denom else 0.0
+                return float(vec @ q_vec) / denom if denom else 0.0
 
             return numpy_scorer
 
@@ -2539,7 +2546,7 @@ class VectorMemoryStore:
             denom = math.sqrt(sum(y * y for y in vec)) * q_norm_py
             if not denom:
                 return 0.0
-            return max(0.0, sum(x * y for x, y in zip(query_emb, vec)) / denom)
+            return sum(x * y for x, y in zip(query_emb, vec)) / denom
 
         return stdlib_scorer
 
@@ -2547,7 +2554,18 @@ class VectorMemoryStore:
 
     @staticmethod
     def _cosine_sim(a: list[float], b: list[float]) -> float:
-        """Cosine similarity between two vectors."""
+        """Cosine similarity between two vectors.
+
+        Vectors of different length are incomparable and score 0.0 rather
+        than being silently truncated to the shorter one by ``zip`` — a row
+        embedded at a different dimensionality (e.g. an old embedding-model
+        generation) would otherwise return a plausible-looking partial-overlap
+        score instead of being rejected. Matches the dimension guard already
+        enforced by ``_stored_similarity_scorer`` (byte-length check) and
+        ``HybridRetriever._cosine_similarity``.
+        """
+        if len(a) != len(b):
+            return 0.0
         dot = sum(x * y for x, y in zip(a, b))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(y * y for y in b))
