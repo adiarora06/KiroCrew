@@ -95,6 +95,28 @@ function isoToTs(iso: string): number {
 type SortKey = 'name' | 'slug' | 'kind' | 'source' | 'version' | 'tags' | 'updated'
 type SortState = { key: SortKey; dir: 'asc' | 'desc' } | null
 
+/** localStorage key for the persisted table sort, alongside the sibling
+ * Gallery/Table view toggle's `mc-artifacts-view`. */
+const SORT_STORAGE_KEY = 'mc-artifacts-sort'
+const SORT_KEYS: readonly SortKey[] = ['name', 'slug', 'kind', 'source', 'version', 'tags', 'updated']
+
+/** Reads the persisted sort choice, tolerating an absent, corrupt, or
+ * foreign-shaped value (falls back to `null` — the server's order). */
+function loadPersistedSort(): SortState {
+  const raw = localStorage.getItem(SORT_STORAGE_KEY)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (
+      parsed && typeof parsed === 'object' &&
+      SORT_KEYS.includes(parsed.key) && (parsed.dir === 'asc' || parsed.dir === 'desc')
+    ) {
+      return { key: parsed.key, dir: parsed.dir }
+    }
+  } catch { /* corrupt value -- fall through to unsorted */ }
+  return null
+}
+
 /** Type-aware comparator: numeric for version, chronological for updated,
  * locale-collated natural string for the rest (compareText names the active
  * UI locale — never the host's). Direction is applied by the caller. */
@@ -1512,16 +1534,21 @@ export default function ArtifactsPage() {  const navigate = useNavigate()
   const [view, setView] = useState<'grid' | 'table'>(
     () => (localStorage.getItem('mc-artifacts-view') === 'table' ? 'table' : 'grid'),
   )
-  // Table column sort — session-local; null renders the server's order.
-  const [sort, setSort] = useState<SortState>(null)
+  // Table column sort — persisted alongside the view toggle so a user who
+  // works sorted-by-Updated doesn't re-sort on every return; null renders
+  // the server's order.
+  const [sort, setSort] = useState<SortState>(loadPersistedSort)
   const handleSort = useCallback((key: SortKey) => {
-    setSort((prev) =>
-      prev?.key !== key
-        ? { key, dir: 'asc' }
-        : prev.dir === 'asc'
-          ? { key, dir: 'desc' }
-          : null,
-    )
+    setSort((prev) => {
+      const next: SortState =
+        prev?.key !== key
+          ? { key, dir: 'asc' }
+          : prev.dir === 'asc'
+            ? { key, dir: 'desc' }
+            : null
+      safeSetItem(SORT_STORAGE_KEY, next ? JSON.stringify(next) : '')
+      return next
+    })
   }, [])
 
   // ── Folder browse scope ──────────────────────────────────────

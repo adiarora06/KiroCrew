@@ -4,6 +4,18 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Artifacts: table sort now persists, the copy button aligns to the
+  content card, and a failed copy shows its own state.** The sort column/
+  direction reset on every visit while the sibling Gallery/Table toggle
+  already persisted; it's now remembered the same way. The copy-content
+  button right-aligned to the full column width while markdown/text bodies
+  render in a narrower, centered reading-width card, so the button could sit
+  far from the content it copies — it now width-matches that card (iframe
+  kinds, which render full width regardless of the reading-width setting,
+  are unaffected). A rejected clipboard write used to be silently swallowed,
+  giving neither the Copied confirmation nor any error; it now shows a
+  distinct failure state. (#2907)
+
 - **`kirocrew` commands start up to ~0.8 s faster, and each MCP stdio server
   drops ~58 MB of resident memory.** `cli.py` imported its full 132-subcommand
   dispatch table at module scope — including the Slack gateway, the dashboard

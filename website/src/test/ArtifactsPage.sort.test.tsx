@@ -54,6 +54,10 @@ describe('ArtifactsPage table sorting', () => {
     vi.clearAllMocks()
     localStorage.setItem('mc-artifacts-view', 'table')
     localStorage.setItem('mc-artifacts-pinned-only', '0')
+    // Sort is now persisted (#2907) -- clear so every test starts from the
+    // server's default order regardless of what an earlier test in this file
+    // left behind, matching what "cycles Name asc -> desc -> default" asserts.
+    localStorage.removeItem('mc-artifacts-sort')
     vi.mocked(api).artifacts = vi.fn().mockResolvedValue({ artifacts: ARTIFACTS })
     vi.mocked(api).artifactSessionDocs = vi.fn().mockResolvedValue({ docs: [] })
   })
@@ -99,6 +103,48 @@ describe('ArtifactsPage table sorting', () => {
     expect(rowNames()).toEqual(['item-10', 'alpha', 'item-2'])
     fireEvent.click(header('Updated'))
     expect(rowNames()).toEqual(['item-2', 'alpha', 'item-10'])
+  })
+
+  it('persists the sort choice and restores it on the next mount', async () => {
+    const { unmount } = renderWithProviders(<ArtifactsPage />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    fireEvent.click(header('Name'))
+    expect(rowNames()).toEqual(['alpha', 'item-2', 'item-10'])
+    expect(localStorage.getItem('mc-artifacts-sort')).toBe('{"key":"name","dir":"asc"}')
+    unmount()
+
+    // A later mount (e.g. the user navigating away and back) restores it
+    // without another click -- the sibling Gallery/Table view toggle already
+    // persists this way.
+    renderWithProviders(<ArtifactsPage />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    expect(rowNames()).toEqual(['alpha', 'item-2', 'item-10'])
+    expect(header('Name').closest('th')?.getAttribute('aria-sort')).toBe('ascending')
+  })
+
+  it('clears the persisted sort back to unset on the third click', async () => {
+    const { unmount } = renderWithProviders(<ArtifactsPage />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    fireEvent.click(header('Name')) // asc
+    fireEvent.click(header('Name')) // desc
+    fireEvent.click(header('Name')) // back to default
+    expect(localStorage.getItem('mc-artifacts-sort')).toBe('')
+    unmount()
+
+    renderWithProviders(<ArtifactsPage />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    expect(rowNames()).toEqual(['item-10', 'item-2', 'alpha'])
+  })
+
+  it('ignores a corrupt persisted sort value and falls back to server order', async () => {
+    localStorage.setItem('mc-artifacts-sort', '{not json')
+    renderWithProviders(<ArtifactsPage />)
+    await waitFor(() => expect(screen.getByText('alpha')).toBeInTheDocument())
+    expect(rowNames()).toEqual(['item-10', 'item-2', 'alpha'])
+    const sorted = screen
+      .getAllByRole('columnheader')
+      .filter((th) => th.getAttribute('aria-sort'))
+    expect(sorted).toHaveLength(0)
   })
 
   it('marks the active column with aria-sort and moves it on a new column click', async () => {

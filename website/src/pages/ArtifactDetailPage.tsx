@@ -1322,6 +1322,11 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
   // swaps to a check for a moment as the success confirmation (the same
   // pattern chat messages and diff blocks use).
   const [copied, setCopied] = useState(false)
+  // A failed clipboard write (permission denied, insecure context, etc.) used
+  // to be swallowed silently -- the button gave neither the Copied
+  // confirmation nor any error, so a user who clicked it had no way to tell
+  // whether anything happened. Mirrors `copied`'s own timed reset.
+  const [copyFailed, setCopyFailed] = useState(false)
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => {
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
@@ -1329,11 +1334,17 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
   const handleCopyContent = useCallback(() => {
     copyToClipboard(artifact?.content ?? '')
       .then(() => {
+        setCopyFailed(false)
         setCopied(true)
         if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
         copiedTimerRef.current = setTimeout(() => setCopied(false), 1500)
       })
-      .catch(() => {})
+      .catch(() => {
+        setCopied(false)
+        setCopyFailed(true)
+        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+        copiedTimerRef.current = setTimeout(() => setCopyFailed(false), 1500)
+      })
   }, [artifact])
 
   const downloadAsHtml = () => {
@@ -1806,17 +1817,25 @@ export default function ArtifactDetailPage({ popout = false }: { popout?: boolea
                 could obscure a heading's trailing text or cover a top-right
                 control inside a widget artifact). Hidden for image (bytes, not
                 text) and webapp (deploy card has its own affordances), and
-                while the editor owns the surface. */}
+                while the editor owns the surface.
+
+                Width-matched to the body via mdPreviewStyle so the button
+                right-aligns to the CONTENT CARD's edge, not the full column —
+                markdown/text render reading-width-constrained and centered
+                (ReadingWidthToggle), so without this the button could sit far
+                from the content it copies. Iframe kinds (widget/html) render
+                full width regardless of the reading-width setting, so their
+                slot stays full width too — button and body already agree. */}
             {artifact.kind !== 'webapp' && artifact.kind !== 'image' && !editing && (
-              <div className="flex justify-end mb-1.5">
+              <div className="flex justify-end mb-1.5" style={usesIframe ? undefined : mdPreviewStyle}>
                 <Btn
                   type="button"
                   onClick={handleCopyContent}
                   className="p-1.5 rounded-md border border-border text-muted hover:text-text hover:border-border-strong cursor-pointer transition-all"
-                  title={copied ? i18nT('pages.artifactDetailPage.copied') : i18nT('pages.artifactDetailPage.copy_content')}
-                  aria-label={copied ? i18nT('pages.artifactDetailPage.copied') : i18nT('pages.artifactDetailPage.copy_content')}
+                  title={copyFailed ? i18nT('pages.artifactDetailPage.copy_failed') : copied ? i18nT('pages.artifactDetailPage.copied') : i18nT('pages.artifactDetailPage.copy_content')}
+                  aria-label={copyFailed ? i18nT('pages.artifactDetailPage.copy_failed') : copied ? i18nT('pages.artifactDetailPage.copied') : i18nT('pages.artifactDetailPage.copy_content')}
                 >
-                  {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+                  {copyFailed ? <AlertCircle size={13} className="text-danger" /> : copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
                 </Btn>
               </div>
             )}

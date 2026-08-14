@@ -73,6 +73,21 @@ describe('ArtifactDetailPage copy content', () => {
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
   })
 
+  it('shows a failure state on a rejected clipboard write, then recovers', async () => {
+    vi.mocked(copyToClipboard).mockRejectedValueOnce(new Error('denied'))
+    renderRoute()
+    await waitFor(() => expect(screen.getByText('CR Queue')).toBeInTheDocument())
+    fireEvent.click(copyBtn())
+    // A failed write used to be silently swallowed -- neither Copied nor any
+    // error. It must now surface its own state, distinct from success.
+    expect(await screen.findByRole('button', { name: 'Copy failed' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copied' })).toBeNull()
+    // A later successful copy still works and clears the failure state.
+    vi.mocked(copyToClipboard).mockResolvedValueOnce(undefined)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy failed' }))
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+  })
+
   it('copies the selected historical version, not live', async () => {
     vi.mocked(api).artifactVersion = vi
       .fn()
