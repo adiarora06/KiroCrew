@@ -4,6 +4,26 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **A long-running cron job's next tick is no longer dispatched up to 30s
+  late.** A job is invisible to the scheduler's wake computation while it's
+  executing (`_next_wake_secs` skips anything in `self._executing`), so for
+  a job whose run takes most of its interval, the timer's last wake before
+  completion — capped at the 30s poll interval — is what the next dispatch
+  had to wait for, since finishing a job never re-armed the timer. Measured
+  in the field on a 60s-interval job with a ~57s run: 20% of ticks landed
+  ≥20s late, costing roughly double the job's own `interval - duration`
+  idle-time floor. Job completion now re-arms the timer with its real
+  next-due delay. The naive version of this fix is unsafe: a job's
+  completion runs on its own task, not the timer's, so a blind
+  `_arm_timer()` call racing the timer's own in-flight dispatch sweep
+  (`_on_timer`, yielded at its worker-thread scan) would cancel that sweep
+  mid-flight and drop any due jobs not yet spawned for that tick. A job
+  completing in that narrow window now no-ops instead — `_on_timer`'s own
+  tick already unconditionally re-arms once the sweep finishes, by which
+  point the completed job is no longer `_executing`, so the corrected delay
+  still gets picked up, just moments later rather than being computed
+  twice.
+
 - **Removing a worktree in Dev Fleet no longer strands its pod's isolated
   HOME.** Reclamation was gated on the pod's unit still being ACTIVE, which the
   ordinary path never is: you stop the pod when testing ends and prune days

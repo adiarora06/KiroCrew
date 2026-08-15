@@ -660,6 +660,12 @@ class CronService:
         self._on_job = on_job
         self._jobs: list[CronJob] = []
         self._timer_task: asyncio.Task[None] | None = None
+        # True only for the span of an in-flight _on_timer() dispatch pass
+        # (set/cleared there). _arm_timer() checks this to avoid cancelling
+        # self._timer_task out from under a sweep that hasn't finished
+        # spawning its due jobs yet — see _arm_timer's guard for the failure
+        # mode this prevents.
+        self._on_timer_running = False
         self._running = False
         # The event loop this service is bound to, captured in create()/start()
         # (the gateway's loop). _arm_timer() uses it to re-arm the timer THREAD-
@@ -2361,6 +2367,24 @@ class CronService:
         # create the replacement task below; the finishing tick exits normally.
         # A *different* caller rescheduling while the tick merely waits on
         # shutdown_event still cancels correctly (current is not the timer task).
+        #
+        # A DIFFERENT hazard, same root cause, needs a second guard: a job's
+        # own completion handler calls _arm_timer() (see _run_job_isolated) to
+        # re-arm promptly instead of waiting out the rest of the poll cap, but
+        # that call runs on the JOB's task, not the timer's — so `current is
+        # not self._timer_task` above is true even while _on_timer is still
+        # mid-sweep (yielded at its own to_thread scan). Cancelling here would
+        # abort that sweep exactly as the self-referential case above
+        # describes, just reached from a different caller. Neither cancelling
+        # NOR creating a replacement task is safe in that window (creating one
+        # too would leave two timer tasks alive and double-fire the next
+        # tick), so this arm is dropped entirely: _on_timer's own tick already
+        # unconditionally re-arms in its `finally` once the sweep completes
+        # (by which point the completed job is no longer in self._executing),
+        # so the delay this caller wanted still gets picked up, just a moment
+        # later rather than being computed twice.
+        if self._on_timer_running and current is not self._timer_task:
+            return
         if self._timer_task and not self._timer_task.done() and self._timer_task is not current:
             self._timer_task.cancel()
         if not self._running:
@@ -2426,106 +2450,115 @@ class CronService:
         ``no-blocking-call-on-event-loop`` rule). The mutation-free due-scan —
         which reads loop-owned ``self._executing`` — then runs on the loop
         against the returned snapshot.
+
+        Brackets the whole body with ``self._on_timer_running`` so a job
+        completing during either ``to_thread`` await below (the scan, and the
+        admission check) cannot have its ``_arm_timer()`` call cancel
+        ``self._timer_task`` out from under this sweep — see ``_arm_timer``.
         """
-        snapshot = await asyncio.to_thread(self._tick_scan_locked)
-        now = time.time()
-        due = [
-            j
-            for j in snapshot
-            if j.enabled and j.id not in self._executing and self._is_due(j, now)
-        ]
+        self._on_timer_running = True
+        try:
+            snapshot = await asyncio.to_thread(self._tick_scan_locked)
+            now = time.time()
+            due = [
+                j
+                for j in snapshot
+                if j.enabled and j.id not in self._executing and self._is_due(j, now)
+            ]
 
-        # An empty due-scan can only end the tick when no deferral episode is
-        # in progress: the recovery log (below) must still fire on a quiet
-        # tick, otherwise an episode that ends during a lull is never closed.
-        if not due and not self._admission_deferring:
-            return
+            # An empty due-scan can only end the tick when no deferral episode is
+            # in progress: the recovery log (below) must still fire on a quiet
+            # tick, otherwise an episode that ends during a lull is never closed.
+            if not due and not self._admission_deferring:
+                return
 
-        # Posture-gated admission: while host memory is CRITICAL, defer this
-        # tick's ``every``/``at`` firings instead of admitting more work onto
-        # a host that cannot absorb it. The verdict is computed off-loop
-        # (config + procfs reads must not stall the event loop). Deferral is
-        # deliberately STATELESS and only applies to schedule kinds that stay
-        # due on their own (``last_run_ts`` untouched, so a deferred job fires
-        # on the first admitted tick). A cron-expression job is only due while
-        # its expression matches the current minute, so it cannot be deferred
-        # statelessly: an in-memory catch-up marker loses the occurrence on
-        # gateway restart, and dropping it silently loses the occurrence
-        # outright — so cron-expression jobs run normally even under critical
-        # posture (persisted deferral markers are a possible follow-up).
-        # Manual runs (run_job / cron_trigger) never pass through this scan
-        # and are not deferred. Fails open on unknown posture. The INFO log
-        # fires once per deferral episode and re-fires every 15 minutes so a
-        # long suspension stays diagnosable.
-        decision = await asyncio.to_thread(admission_check)
+            # Posture-gated admission: while host memory is CRITICAL, defer this
+            # tick's ``every``/``at`` firings instead of admitting more work onto
+            # a host that cannot absorb it. The verdict is computed off-loop
+            # (config + procfs reads must not stall the event loop). Deferral is
+            # deliberately STATELESS and only applies to schedule kinds that stay
+            # due on their own (``last_run_ts`` untouched, so a deferred job fires
+            # on the first admitted tick). A cron-expression job is only due while
+            # its expression matches the current minute, so it cannot be deferred
+            # statelessly: an in-memory catch-up marker loses the occurrence on
+            # gateway restart, and dropping it silently loses the occurrence
+            # outright — so cron-expression jobs run normally even under critical
+            # posture (persisted deferral markers are a possible follow-up).
+            # Manual runs (run_job / cron_trigger) never pass through this scan
+            # and are not deferred. Fails open on unknown posture. The INFO log
+            # fires once per deferral episode and re-fires every 15 minutes so a
+            # long suspension stays diagnosable.
+            decision = await asyncio.to_thread(admission_check)
 
-        # The admission await yielded the loop, so the due snapshot may be
-        # stale: a manual run (run_job / cron_trigger) can have claimed — or
-        # even completed — a job meanwhile, and a job can have been edited,
-        # disabled, or queued for removal. Rebuild the due list from the LIVE
-        # job objects and re-run the due check BEFORE the deferral partition
-        # below: classifying by the stale snapshot's schedule kind would let
-        # an interval job edited into a matching cron expression during the
-        # await be deferred-and-dropped (its occurrence lost), and dispatching
-        # the snapshot object would execute a stale definition. An id-only
-        # check would double-fire a job whose manual run already finished.
-        # The re-check deliberately reuses the scan-time ``now``: a live
-        # ``last_run_ts`` advanced by a finished manual run still fails it
-        # (interval math for ``every``/``at``, the same-minute guard for cron
-        # expressions), while a minute boundary crossed during the await
-        # cannot drop a cron-expression occurrence that was genuinely due at
-        # scan time.
-        live_by_id = {j.id: j for j in self._jobs if j.enabled}
-        due = [
-            live_by_id[j.id]
-            for j in due
-            if j.id in live_by_id
-            and j.id not in self._executing
-            and j.id not in self._pending_removals
-            and self._is_due(live_by_id[j.id], now)
-        ]
+            # The admission await yielded the loop, so the due snapshot may be
+            # stale: a manual run (run_job / cron_trigger) can have claimed — or
+            # even completed — a job meanwhile, and a job can have been edited,
+            # disabled, or queued for removal. Rebuild the due list from the LIVE
+            # job objects and re-run the due check BEFORE the deferral partition
+            # below: classifying by the stale snapshot's schedule kind would let
+            # an interval job edited into a matching cron expression during the
+            # await be deferred-and-dropped (its occurrence lost), and dispatching
+            # the snapshot object would execute a stale definition. An id-only
+            # check would double-fire a job whose manual run already finished.
+            # The re-check deliberately reuses the scan-time ``now``: a live
+            # ``last_run_ts`` advanced by a finished manual run still fails it
+            # (interval math for ``every``/``at``, the same-minute guard for cron
+            # expressions), while a minute boundary crossed during the await
+            # cannot drop a cron-expression occurrence that was genuinely due at
+            # scan time.
+            live_by_id = {j.id: j for j in self._jobs if j.enabled}
+            due = [
+                live_by_id[j.id]
+                for j in due
+                if j.id in live_by_id
+                and j.id not in self._executing
+                and j.id not in self._pending_removals
+                and self._is_due(live_by_id[j.id], now)
+            ]
 
-        if not decision.admitted:
-            deferred = [j for j in due if j.schedule.kind != "cron"]
-            due = [j for j in due if j.schedule.kind == "cron"]
-            now_mono = time.monotonic()
-            if not self._admission_deferring:
-                self._admission_deferring = True
-                self._admission_last_log = now_mono
+            if not decision.admitted:
+                deferred = [j for j in due if j.schedule.kind != "cron"]
+                due = [j for j in due if j.schedule.kind == "cron"]
+                now_mono = time.monotonic()
+                if not self._admission_deferring:
+                    self._admission_deferring = True
+                    self._admission_last_log = now_mono
+                    logger.info(
+                        "Cron: deferring interval/one-shot firings (%d deferred "
+                        "this tick; cron-expression jobs run normally) — %s "
+                        "(re-logged every 15 min while the episode lasts)",
+                        len(deferred),
+                        decision.reason,
+                    )
+                elif now_mono - self._admission_last_log >= 900.0:
+                    self._admission_last_log = now_mono
+                    logger.info(
+                        "Cron: STILL deferring interval/one-shot firings (%d "
+                        "deferred this tick) — %s",
+                        len(deferred),
+                        decision.reason,
+                    )
+                else:
+                    logger.debug(
+                        "Cron: still deferring %d scheduled job(s)", len(deferred)
+                    )
+            elif self._admission_deferring:
+                self._admission_deferring = False
                 logger.info(
-                    "Cron: deferring interval/one-shot firings (%d deferred "
-                    "this tick; cron-expression jobs run normally) — %s "
-                    "(re-logged every 15 min while the episode lasts)",
-                    len(deferred),
-                    decision.reason,
+                    "Cron: memory posture recovered — resuming scheduled firings"
                 )
-            elif now_mono - self._admission_last_log >= 900.0:
-                self._admission_last_log = now_mono
-                logger.info(
-                    "Cron: STILL deferring interval/one-shot firings (%d "
-                    "deferred this tick) — %s",
-                    len(deferred),
-                    decision.reason,
-                )
-            else:
-                logger.debug(
-                    "Cron: still deferring %d scheduled job(s)", len(deferred)
-                )
-        elif self._admission_deferring:
-            self._admission_deferring = False
-            logger.info(
-                "Cron: memory posture recovered — resuming scheduled firings"
-            )
 
-        if not due:
-            return
+            if not due:
+                return
 
-        # Fire each job independently — one hung job never blocks others.
-        for j in due:
-            self._executing.add(j.id)
-            self._job_run_meta.setdefault(j.id, (time.time(), "scheduled"))
-            task = asyncio.create_task(self._run_job_isolated(j))
-            self._running_tasks[j.id] = task
+            # Fire each job independently — one hung job never blocks others.
+            for j in due:
+                self._executing.add(j.id)
+                self._job_run_meta.setdefault(j.id, (time.time(), "scheduled"))
+                task = asyncio.create_task(self._run_job_isolated(j))
+                self._running_tasks[j.id] = task
+        finally:
+            self._on_timer_running = False
 
     async def _run_job_isolated(self, job: CronJob) -> None:
         """Execute a single job and merge results back to disk."""
@@ -2648,6 +2681,20 @@ class CronService:
                         self._push_refresh("cron_history")
                 except Exception:
                     logger.exception("Failed to record history for job '%s'", job.name)
+            # Re-arm now rather than waiting for whatever wake was already
+            # armed: a job that ran for most of its interval was invisible to
+            # every _next_wake_secs() computed while self._executing held it
+            # (see _next_wake_secs), so the armed delay can be stale by up to
+            # _TIMER_POLL_SECS by the time this job becomes due again. Placed
+            # at the very end, after last_run_ts/history are settled, so the
+            # delay this computes reflects this run's actual outcome. Safe to
+            # call unconditionally (also when reaped/cancelled, or when
+            # nothing changed): _arm_timer() itself no-ops when the service
+            # isn't running, and the self._on_timer_running guard there
+            # covers the one case where this job's own completion happens to
+            # race an in-flight dispatch sweep.
+            if self._running:
+                self._arm_timer()
 
     @staticmethod
     def _compute_jitter(job: CronJob) -> float:
