@@ -18,6 +18,20 @@ All notable changes to KiroCrew are documented in this file.
   for the last 24 h, and the log rotates at 1 MiB instead of growing without
   bound. (#3495)
 
+- **`TestIsDeniedReDoSResistance::test_cpu_cost_is_immune_to_other_threads_where_process_time_is_not`
+  no longer intermittently fails CI** (observed "process_time did not exceed
+  thread_time under a 2-spinner burst"). The test's 5-sample loop required
+  every single process-time/thread-time comparison to succeed, so one sample
+  where a shared CI runner's scheduler didn't interleave the burst threads
+  within the narrow measurement window failed the whole test even though the
+  invariant it checks — that `_cpu_cost` doesn't see other threads' CPU —
+  held on every other sample. Now tolerates a minority (≤1 of 5) of failed
+  samples; a genuine break in `_cpu_cost` still fails every sample. (The
+  companion flake in `test_mid_dotstar_chain_spam_stays_linear`, tracked in
+  the same upstream issue kirodotdev/KiroCrew#3080, was independently fixed
+  by #3692 while this PR was open — this change covers the one flaky
+  assertion #3692 didn't touch.)
+
 - **The instance token-mint timeout is now user-configurable.** The remote
   `kirocrew token` mint ran with a hardcoded 30s budget, so a user behind a
   slow ProxyCommand/jump host timed out in the mint step even when the ssh

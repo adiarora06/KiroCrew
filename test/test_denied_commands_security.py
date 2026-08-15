@@ -592,21 +592,39 @@ class TestIsDeniedReDoSResistance:
         for thread in spinners:
             thread.start()
         try:
+            # Majority vote across 5 independent samples, not a per-sample assert:
+            # both checks below depend on the OS scheduler actually interleaving
+            # this thread against the 2 spinners within each iteration's narrow
+            # window, which a heavily loaded shared CI runner (many concurrent
+            # pytest-xdist workers contending for the same cores) can occasionally
+            # fail to do for a single sample without the underlying invariant
+            # being false. A genuine break in `_cpu_cost` (seeing other threads'
+            # CPU, or the burst harness generating no process-level signal at all)
+            # still fails a majority of samples, since it holds on every iteration.
+            failures = []
             for _ in range(5):
                 process_start = time.process_time()
                 measured = self._cpu_cost(burn)
                 process_delta = time.process_time() - process_start
-                assert measured < true_cost * 2.0, (
-                    f"_cpu_cost reported {measured:.3f}s for {true_cost}s of own-thread "
-                    "work — the clock is seeing other threads' CPU"
-                )
+                if measured >= true_cost * 2.0:
+                    failures.append(
+                        f"_cpu_cost reported {measured:.3f}s for {true_cost}s of "
+                        "own-thread work — the clock is seeing other threads' CPU"
+                    )
+                    continue
                 # The control: the process-wide clock DOES absorb the burst (it
                 # accumulates the spinners' CPU during their GIL timeslices), so a
                 # clean _cpu_cost reading above is discriminating, not vacuous.
-                assert process_delta > measured, (
-                    "process_time did not exceed thread_time under a 2-spinner burst — "
-                    "the burst harness is not generating in-process noise"
-                )
+                if process_delta <= measured:
+                    failures.append(
+                        "process_time did not exceed thread_time under a "
+                        "2-spinner burst — the burst harness is not generating "
+                        "in-process noise"
+                    )
+            assert len(failures) <= 1, (
+                f"{len(failures)}/5 samples failed (need a majority to hold): "
+                + "; ".join(failures)
+            )
         finally:
             stop.set()
             for thread in spinners:
