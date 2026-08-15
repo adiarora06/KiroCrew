@@ -53,6 +53,20 @@ All notable changes to KiroCrew are documented in this file.
   every other boolean field in the loader; a non-bool value falls through to
   the next accepted spelling instead of being read as a grant. (#3730)
 
+- **A session no longer risks two interleaved turns after a mid-turn reset.**
+  `record_failure`'s circuit breaker calls `reset(key)` while the failing
+  caller still nominally holds that session's turn semaphore; `reset` pops the
+  session and tears it down without touching the semaphore. If a concurrent
+  `get_or_create` for the same key registered a replacement session in that
+  window, the original caller's later `release(key)` — a fresh lookup by key,
+  not the specific session object it acquired — released the REPLACEMENT's
+  semaphore instead, an over-release that could hand out a surplus permit and
+  let a third message start a turn while a second was still in flight on the
+  same live provider session. The per-session semaphore is now a
+  `BoundedSemaphore`, so a stray release beyond its one permit raises instead
+  of silently succeeding; `release()` catches that specific error and logs a
+  warning rather than propagating into a caller's `finally`. (#3749)
+
 - **A folder knowledge source added from the dashboard can now be started.**
   The row's `sync_status` was stored twice — as a table column and inside the
   properties JSON — and the create path wrote `pending_confirmation` only into

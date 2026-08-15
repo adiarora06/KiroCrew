@@ -654,7 +654,12 @@ class _Session:
     resumed_armed: bool = False
     prompt_count: int = 0
     consecutive_failures: int = 0
-    semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    # Bounded rather than plain: a release() call that lands on this object
+    # after get_or_create() has already replaced it at the session key (see
+    # SessionManager.release) must raise instead of silently pushing the
+    # counter above 1, which would let a second turn acquire concurrently
+    # with one still in flight.
+    semaphore: asyncio.BoundedSemaphore = field(default_factory=lambda: asyncio.BoundedSemaphore(1))
     approval_policy: str = ""  # "" (interactive) | "auto" (auto-approve all tools)
     agent: str = ""  # kiro agent name used for this session
     # Slack message queue: FIFO of (msg_ts, text, kwargs) waiting for the semaphore
@@ -4125,7 +4130,19 @@ class SessionManager:
                         asyncio.ensure_future(self._safe_cleanup(session.provider, session_id))
                 except Exception:
                     logger.debug("Failed to get session_id for cleanup", exc_info=True)
-            session.semaphore.release()
+            try:
+                session.semaphore.release()
+            except ValueError:
+                # This key's session was popped and replaced (e.g. by reset())
+                # between our caller's acquire and this release — releasing
+                # the NEW occupant's semaphore would let a second turn run
+                # concurrently with one already in flight on it. Drop it.
+                logger.warning(
+                    "release(%s): session was replaced under us; dropping "
+                    "stray semaphore release instead of over-releasing the "
+                    "new occupant's",
+                    key,
+                )
 
     async def _safe_cleanup(self, provider: LLMProvider, session_id: str) -> None:
         """Best-effort session file cleanup."""
