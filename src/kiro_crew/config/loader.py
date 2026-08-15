@@ -3804,10 +3804,26 @@ def _read_skip_permissions(agent_data: dict) -> bool:
     ``dangerouslySkipPermissions`` (the camelCase form used by other agent tools,
     so a config copied from one still works) and the legacy ``yolo`` (so no
     existing config silently loses auto-approve on upgrade).
+
+    Requires a REAL ``bool``, not Python truthiness: a stringly-typed value
+    from a templated/generated config — ``"false"``, ``"0"``, ``"no"``, or any
+    other non-empty string a hand-edit or a config generator might write — is
+    truthy in Python, so a bare ``bool(...)`` here would silently turn
+    "explicitly disabled" into the standing, unattended tool-auto-approve
+    grant this key controls. A non-bool value is never treated as an
+    affirmative grant; it falls through to check the next spelling, then to
+    the ``False`` default.
     """
     for key in ("dangerously_skip_permissions", "dangerouslySkipPermissions", "yolo"):
         if key in agent_data:
-            return bool(agent_data.get(key))
+            value = agent_data[key]
+            if isinstance(value, bool):
+                return value
+            logger.warning(
+                "agent.%s must be a real boolean, got %r — treating as unset",
+                key,
+                value,
+            )
     return False
 
 

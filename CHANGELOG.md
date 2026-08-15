@@ -33,6 +33,16 @@ All notable changes to KiroCrew are documented in this file.
   that matches it (case-insensitively); any other mention, or none resolved
   yet, is left attached and falls through as unrecognized. (#3734)
 
+- **`agent.dangerously_skip_permissions` no longer treats a string value as an
+  affirmative grant.** The config loader coerced this field with a bare
+  `bool(...)`, so a plausible config shape like `"dangerously_skip_permissions":
+  "false"` (any non-empty string is truthy in Python) silently activated the
+  standing, unattended tool-auto-approve grant this key controls — every tool
+  call gets auto-approved with no confirmation prompt — instead of the
+  explicit disable the value said. Now requires a real boolean, matching
+  every other boolean field in the loader; a non-bool value falls through to
+  the next accepted spelling instead of being read as a grant. (#3730)
+
 - **A folder knowledge source added from the dashboard can now be started.**
   The row's `sync_status` was stored twice — as a table column and inside the
   properties JSON — and the create path wrote `pending_confirmation` only into
