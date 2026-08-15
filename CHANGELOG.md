@@ -4,6 +4,15 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **A Teams answer no longer gets silently truncated by a rate-limited
+  chunk.** The Bot Framework Connector API enforces per-bot rate limits and
+  can return HTTP 429, but the Teams outbound send raised immediately with
+  no retry, unlike the Discord/Telegram/Webex clients (which all absorb a
+  single 429 honoring the server's back-off hint). A multi-chunk answer
+  stops at its first failed chunk, so a throttled chunk dropped it and
+  everything after it, with only a backend log line. Outbound sends now
+  retry once on 429, honoring the Connector API's `Retry-After` header. (#3738)
+
 - **A folder knowledge source added from the dashboard can now be started.**
   The row's `sync_status` was stored twice — as a table column and inside the
   properties JSON — and the create path wrote `pending_confirmation` only into
