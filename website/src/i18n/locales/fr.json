@@ -2383,6 +2383,7 @@
         "recording": "Enregistrement…",
         "remove": "Retirer",
         "removeConfirm": "Retirer ce coffre de l’application ? Vos fichiers restent intacts sur le disque — seule la connexion est oubliée.",
+        "removeFailed": "Impossible de retirer le coffre : {{message}}",
         "removeIt": "Le retirer",
         "reset": "Réinitialiser",
         "save": "Enregistrer",
@@ -2394,9 +2395,11 @@
         "syncSection": "Synchronisation",
         "title": "Réglages",
         "tokenCleared": "Jeton effacé.",
+        "tokenClearFailed": "Impossible d’effacer le jeton : {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "Remplacer le jeton stocké…",
         "tokenSaved": "Jeton enregistré.",
+        "tokenSaveFailed": "Impossible d’enregistrer le jeton : {{message}}",
         "vaultsSection": "Coffres"
       },
       "sort": {

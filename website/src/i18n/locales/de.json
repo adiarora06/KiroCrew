@@ -2341,6 +2341,7 @@
         "recording": "Aufnahme…",
         "remove": "Entfernen",
         "removeConfirm": "Diesen Vault aus der App entfernen? Die Dateien bleiben unangetastet auf der Festplatte – nur die Verbindung wird vergessen.",
+        "removeFailed": "Der Vault konnte nicht entfernt werden: {{message}}",
         "removeIt": "Entfernen",
         "reset": "Zurücksetzen",
         "save": "Speichern",
@@ -2352,9 +2353,11 @@
         "syncSection": "Synchronisierung",
         "title": "Einstellungen",
         "tokenCleared": "Token gelöscht.",
+        "tokenClearFailed": "Token konnte nicht gelöscht werden: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "Gespeichertes Token ersetzen…",
         "tokenSaved": "Token gespeichert.",
+        "tokenSaveFailed": "Token konnte nicht gespeichert werden: {{message}}",
         "vaultsSection": "Vaults"
       },
       "sort": {

@@ -2341,6 +2341,7 @@
         "recording": "रिकॉर्डिंग…",
         "remove": "हटाएँ",
         "removeConfirm": "इस वॉल्ट को ऐप से हटाना है? डिस्क पर फ़ाइलें अछूती रहती हैं — केवल कनेक्शन भुला दिया जाता है.",
+        "removeFailed": "वॉल्ट हटाया नहीं जा सका: {{message}}",
         "removeIt": "हटा दें",
         "reset": "रीसेट",
         "save": "सहेजें",
@@ -2352,9 +2353,11 @@
         "syncSection": "सिंक",
         "title": "सेटिंग्स",
         "tokenCleared": "टोकन साफ़ किया गया.",
+        "tokenClearFailed": "टोकन साफ़ नहीं किया जा सका: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "संग्रहीत टोकन बदलें…",
         "tokenSaved": "टोकन सहेजा गया.",
+        "tokenSaveFailed": "टोकन सहेजा नहीं जा सका: {{message}}",
         "vaultsSection": "वॉल्ट"
       },
       "sort": {

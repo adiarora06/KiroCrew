@@ -2299,6 +2299,7 @@
         "recording": "기록 중…",
         "remove": "제거",
         "removeConfirm": "이 보관소를 앱에서 제거하시겠습니까? 파일은 디스크에 그대로 남습니다 — 연결 정보만 잊힙니다.",
+        "removeFailed": "보관소를 제거할 수 없습니다: {{message}}",
         "removeIt": "제거",
         "reset": "초기화",
         "save": "저장",
@@ -2310,9 +2311,11 @@
         "syncSection": "동기화",
         "title": "설정",
         "tokenCleared": "토큰을 지웠습니다.",
+        "tokenClearFailed": "토큰을 지울 수 없습니다: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "저장된 토큰 교체…",
         "tokenSaved": "토큰을 저장했습니다.",
+        "tokenSaveFailed": "토큰을 저장할 수 없습니다: {{message}}",
         "vaultsSection": "보관소"
       },
       "sort": {

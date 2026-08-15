@@ -2299,6 +2299,7 @@
         "recording": "記録中…",
         "remove": "削除",
         "removeConfirm": "このボールトをアプリから削除しますか？ ファイルはディスク上に残ります—接続情報だけが忘れられます。",
+        "removeFailed": "ボールトを削除できませんでした: {{message}}",
         "removeIt": "削除",
         "reset": "リセット",
         "save": "保存",
@@ -2310,9 +2311,11 @@
         "syncSection": "同期",
         "title": "設定",
         "tokenCleared": "トークンをクリアしました。",
+        "tokenClearFailed": "トークンをクリアできませんでした: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "保存されたトークンを置き換え…",
         "tokenSaved": "トークンを保存しました。",
+        "tokenSaveFailed": "トークンを保存できませんでした: {{message}}",
         "vaultsSection": "ボールト"
       },
       "sort": {

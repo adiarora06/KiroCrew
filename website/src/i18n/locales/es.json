@@ -2383,6 +2383,7 @@
         "recording": "Grabando…",
         "remove": "Quitar",
         "removeConfirm": "¿Quitar esta bóveda de la aplicación? Tus archivos quedan intactos en el disco: solo se olvida la conexión.",
+        "removeFailed": "No se pudo quitar la bóveda: {{message}}",
         "removeIt": "Quitarla",
         "reset": "Restablecer",
         "save": "Guardar",
@@ -2394,9 +2395,11 @@
         "syncSection": "Sincronización",
         "title": "Ajustes",
         "tokenCleared": "Token borrado.",
+        "tokenClearFailed": "No se pudo borrar el token: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "Reemplazar el token guardado…",
         "tokenSaved": "Token guardado.",
+        "tokenSaveFailed": "No se pudo guardar el token: {{message}}",
         "vaultsSection": "Bóvedas"
       },
       "sort": {

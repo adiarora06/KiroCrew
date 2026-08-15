@@ -2425,6 +2425,7 @@
         "recording": "Запись…",
         "remove": "Удалить",
         "removeConfirm": "Удалить это хранилище из приложения? Файлы на диске останутся нетронутыми — забудется только подключение.",
+        "removeFailed": "Не удалось удалить хранилище: {{message}}",
         "removeIt": "Удалить",
         "reset": "Сбросить",
         "save": "Сохранить",
@@ -2436,9 +2437,11 @@
         "syncSection": "Синхронизация",
         "title": "Настройки",
         "tokenCleared": "Токен очищен.",
+        "tokenClearFailed": "Не удалось очистить токен: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "Заменить сохранённый токен…",
         "tokenSaved": "Токен сохранён.",
+        "tokenSaveFailed": "Не удалось сохранить токен: {{message}}",
         "vaultsSection": "Хранилища"
       },
       "sort": {

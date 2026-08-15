@@ -1491,6 +1491,7 @@
         "recording": "Recording…",
         "remove": "Remove",
         "removeConfirm": "Remove this vault from the app? Your files are left untouched on disk — only the connection is forgotten.",
+        "removeFailed": "Could not remove the vault: {{message}}",
         "removeIt": "Remove it",
         "reset": "Reset",
         "save": "Save",
@@ -1502,9 +1503,11 @@
         "syncSection": "Sync",
         "title": "Settings",
         "tokenCleared": "Token cleared.",
+        "tokenClearFailed": "Could not clear the token: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "Replace stored token…",
         "tokenSaved": "Token saved.",
+        "tokenSaveFailed": "Could not save the token: {{message}}",
         "vaultsSection": "Vaults"
       },
       "sort": {

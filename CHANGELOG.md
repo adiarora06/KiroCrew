@@ -81,6 +81,23 @@ All notable changes to KiroCrew are documented in this file.
   of silently succeeding; `release()` catches that specific error and logs a
   warning rather than propagating into a caller's `finally`. (#3749)
 
+- **Notes: a failed GitHub token Save/Clear in Settings no longer gets stuck
+  disabled with no explanation.** Neither the Save/Clear button handlers nor
+  the `savePat` action they call had any error handling, so a rejected
+  request (an invalid token, a transient network error) left `busy` stuck
+  `true` — the button permanently disabled — with neither the success
+  confirmation nor any error shown, an unhandled promise rejection, and the
+  only recovery being to close and reopen Settings. Failures are now caught
+  and reported inline next to the button, styled like the sibling per-vault
+  knowledge-toggle error state, and the button always recovers. A review
+  pass caught a sibling with the same root cause: the vault Remove confirm
+  button's `onForget` call still swallowed its failure into the shared
+  `error` banner, which only renders in the main-editor branch and is
+  invisible while Settings is open — the confirm bar also dismissed itself
+  immediately, so nothing indicated the removal was even attempted. Remove
+  now catches inline too, keeps the confirm bar up on failure so the user
+  can retry without reopening it, and clears on success. (#3743)
+
 - **A folder knowledge source added from the dashboard can now be started.**
   The row's `sync_status` was stored twice — as a table column and inside the
   properties JSON — and the create path wrote `pending_confirmation` only into

@@ -2299,6 +2299,7 @@
         "recording": "录制中…",
         "remove": "移除",
         "removeConfirm": "从应用中移除此仓库？磁盘上的文件不会改动 —— 仅忘记该连接。",
+        "removeFailed": "无法移除该仓库：{{message}}",
         "removeIt": "确认移除",
         "reset": "重置",
         "save": "保存",
@@ -2310,9 +2311,11 @@
         "syncSection": "同步",
         "title": "设置",
         "tokenCleared": "令牌已清除。",
+        "tokenClearFailed": "无法清除令牌：{{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "替换已存储的令牌…",
         "tokenSaved": "令牌已保存。",
+        "tokenSaveFailed": "无法保存令牌：{{message}}",
         "vaultsSection": "仓库"
       },
       "sort": {

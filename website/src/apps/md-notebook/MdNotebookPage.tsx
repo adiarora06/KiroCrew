@@ -853,6 +853,11 @@ export default function MdNotebookPage() {
     [flushSave, loadNotes, openNote, repointPin, visibleNotePaths],
   )
 
+  // Deliberately does NOT catch, same reasoning as `savePat` below: it is
+  // only ever invoked from SettingsPage's Remove-confirm button, which
+  // catches this rejection itself and reports it inline, next to the button
+  // that produced it — the shared `error` banner below only renders in the
+  // main-editor branch and is invisible while Settings is open.
   const forgetVault = useCallback(
     async (id: string) => {
       // Forgetting the ACTIVE vault clears the editor below, so persist first —
@@ -863,24 +868,26 @@ export default function MdNotebookPage() {
         await flushSave()
         if (dirtyRef.current) return
       }
-      try {
-        await notesApi.forgetVault(id)
-        if (id === vaultRef.current) {
-          pathRef.current = null
-          setActivePath(null)
-          setContent('')
-          contentRef.current = ''
-          setNotes([])
-          restored.current = false
-        }
-        await loadVaults()
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+      await notesApi.forgetVault(id)
+      if (id === vaultRef.current) {
+        pathRef.current = null
+        setActivePath(null)
+        setContent('')
+        contentRef.current = ''
+        setNotes([])
+        restored.current = false
       }
+      await loadVaults()
     },
     [loadVaults, flushSave],
   )
 
+  // Deliberately does NOT catch, unlike its siblings above (removeNote etc.)
+  // that swallow into the shared `error` banner: that banner only renders in
+  // the main-editor branch, invisible while Settings is open, so a failure
+  // here needs to surface right next to the button the user clicked instead.
+  // SettingsPage's Save/Clear handlers catch this rejection themselves and
+  // report it inline.
   const savePat = useCallback(
     async (value: string) => {
       const r = await notesApi.setPat(value)

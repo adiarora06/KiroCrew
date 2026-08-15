@@ -2341,6 +2341,7 @@
         "recording": "রেকর্ডিং…",
         "remove": "সরান",
         "removeConfirm": "এই ভল্টটি অ্যাপ থেকে সরাবেন? ডিস্কে ফাইলগুলি অপরিবর্তিত থাকে — শুধু সংযোগটি ভুলে যাওয়া হয়।",
+        "removeFailed": "ভল্ট সরানো যায়নি: {{message}}",
         "removeIt": "সরিয়ে দিন",
         "reset": "রিসেট",
         "save": "সংরক্ষণ",
@@ -2352,9 +2353,11 @@
         "syncSection": "সিঙ্ক",
         "title": "সেটিংস",
         "tokenCleared": "টোকেন মোছা হয়েছে।",
+        "tokenClearFailed": "টোকেন মুছতে ব্যর্থ: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "সংরক্ষিত টোকেন বদলান…",
         "tokenSaved": "টোকেন সংরক্ষিত।",
+        "tokenSaveFailed": "টোকেন সংরক্ষণ ব্যর্থ: {{message}}",
         "vaultsSection": "ভল্ট"
       },
       "sort": {

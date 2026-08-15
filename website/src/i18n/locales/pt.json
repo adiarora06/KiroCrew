@@ -2383,6 +2383,7 @@
         "recording": "Gravando…",
         "remove": "Remover",
         "removeConfirm": "Remover este cofre do aplicativo? Seus arquivos permanecem intactos no disco — apenas a conexão é esquecida.",
+        "removeFailed": "Não foi possível remover o cofre: {{message}}",
         "removeIt": "Remover",
         "reset": "Redefinir",
         "save": "Salvar",
@@ -2394,9 +2395,11 @@
         "syncSection": "Sincronização",
         "title": "Configurações",
         "tokenCleared": "Token limpo.",
+        "tokenClearFailed": "Não foi possível limpar o token: {{message}}",
         "tokenPlaceholderEmpty": "github_pat_…",
         "tokenPlaceholderStored": "Substituir o token salvo…",
         "tokenSaved": "Token salvo.",
+        "tokenSaveFailed": "Não foi possível salvar o token: {{message}}",
         "vaultsSection": "Cofres"
       },
       "sort": {
