@@ -429,7 +429,7 @@ interface Worktree {
   path?: string
   provision_run_id?: string | null
 }
-interface FleetData { worktrees: Worktree[]; error?: string; needs_setup?: boolean; base_branch?: string; sync_run_id?: string; build_pending?: boolean; gateway_service_active?: boolean; gateway_service_reason?: string | null; pods_available?: boolean; pods_unavailable_reason?: string | null; serving_install_reason?: string | null; staged_target?: string | null; staged_cancel_available?: boolean; manual_restart?: string }
+interface FleetData { worktrees: Worktree[]; error?: string; needs_setup?: boolean; main_repo?: string; main_repo_inferred?: boolean; base_branch?: string; sync_run_id?: string; build_pending?: boolean; gateway_service_active?: boolean; gateway_service_reason?: string | null; pods_available?: boolean; pods_unavailable_reason?: string | null; serving_install_reason?: string | null; staged_target?: string | null; staged_cancel_available?: boolean; manual_restart?: string }
 interface SyncRun { rid: string; status: 'running' | 'done' | 'error'; lines: string[]; startedAt: number; exit?: number | null; last?: string; stepLabel?: string }
 // Provision run state: the FULL output is kept (not just the last
 // line) so the expandable log panel can show everything, and a failed run
@@ -1713,6 +1713,17 @@ export default function DevFleetPage() {
               <span className="text-text-strong">{i18nT('pages.devFleetPage.rebase')}</span> {i18nT('pages.devFleetPage.moves_a_feature_branch_onto_the_latest_main_and')}{' '}
               <span className="text-text-strong">{i18nT('pages.devFleetPage.prune')}</span> {i18nT('pages.devFleetPage.safely_removes_worktrees_whose_pr_has_already_me')}
             </p>
+            )}
+            {!noFleet && fleet?.main_repo_inferred && fleet.main_repo && (
+              <div
+                role="note"
+                data-testid="inferred-main-checkout"
+                className="flex items-center gap-2 mt-2 max-w-[860px] text-[12px] leading-relaxed text-text-strong"
+              >
+                <Info size={13} className="lucide-inline shrink-0" />
+                <span>{i18nT('pages.devFleetPage.the_primary_checkout_this_fleet_is_discovered_fr')}:</span>
+                <code className="min-w-0 break-all rounded bg-bg-elevated px-1.5 py-0.5 text-text-strong select-text">{fleet.main_repo}</code>
+              </div>
             )}
             {gatewayError && (
               <div

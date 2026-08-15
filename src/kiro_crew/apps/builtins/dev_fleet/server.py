@@ -364,7 +364,15 @@ def _default_main_repo() -> str:
 
 
 # --- configuration ---
-MAIN_REPO = _default_main_repo()
+def _default_main_repo_state() -> tuple[str, bool]:
+    """Import-time checkout hint and whether an inferred tier supplied it."""
+    repo = _default_main_repo()
+    explicit = os.environ.get("KIROCREW_DEVFLEET_REPO", "").strip()
+    return repo, bool(repo and not explicit)
+
+
+# Startup replaces this stat-only hint after the complete discovery chain runs.
+MAIN_REPO, MAIN_REPO_INFERRED = _default_main_repo_state()
 BASE_BRANCH = "main"
 
 # --- upstream remote resolution (replaces hardcoded 'origin') ---
@@ -2230,6 +2238,7 @@ async def _build_fleet() -> dict:
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "worktrees": wts,
         "main_repo": _repo(),
+        "main_repo_inferred": MAIN_REPO_INFERRED,
         "base_branch": BASE_BRANCH,
         "sync_run_id": _SYNC_RID,
         "build_pending": _build_pending(),
@@ -4151,7 +4160,7 @@ async def api_dev_fleet_rebase(request: web.Request) -> web.Response:
 # --- startup hook ---
 async def dev_fleet_startup(app: web.Application) -> None:
     """Start the background fleet refresher on app startup."""
-    global _refresher_task, _warm_task, _reaper_task, MAIN_REPO
+    global _refresher_task, _warm_task, _reaper_task, MAIN_REPO, MAIN_REPO_INFERRED
     loop = asyncio.get_running_loop()
     # Full discovery here rather than at import: it reads config.json and stats
     # candidate directories, both of which would block the event loop on the
@@ -4161,6 +4170,7 @@ async def dev_fleet_startup(app: web.Application) -> None:
     # hook out of the AST ratchet's allowlist, so a future git call added here
     # (where MAIN_REPO is most often still unresolved) cannot read the bare
     # global unnoticed.
+    configured = await loop.run_in_executor(subprocess_executor(), _configured_main_repo)
     discovered = await loop.run_in_executor(subprocess_executor(), _discover_main_repo)
     if discovered:
         discovered = await loop.run_in_executor(
@@ -4185,6 +4195,7 @@ async def dev_fleet_startup(app: web.Application) -> None:
             f"markers (.git, src/kiro_crew/, pyproject.toml). {hint}"
         )
     MAIN_REPO = discovered
+    MAIN_REPO_INFERRED = bool(discovered and not configured)
     await _load_trusted_credential_helpers()
     await _load_fallback_repos()
     await _upstream_remote()

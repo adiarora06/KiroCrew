@@ -60,6 +60,12 @@ in `dev_fleet_startup()`. The startup result is then normalized through
 `_resolve_primary_checkout`, so a hint naming a linked worktree still manages the whole
 fleet.
 
+The `/fleet` payload reports both the resolved `main_repo` and
+`main_repo_inferred`. The latter is true for tiers 3–5 and false for the two
+operator-configured tiers. The page surfaces an inferred path once above the fleet,
+so the checkout targeted by Pull+Build, rebase, and prune is visible without adding
+noise for operators who configured it explicitly.
+
 When no tier resolves, `MAIN_REPO` is `""` — never a synthesized path. Discovery raises
 `RepoNotConfigured` and `/fleet` answers `{"worktrees": [], "needs_setup": true}` with no
 `error` field, which the page renders as a setup prompt. A synthesized default instead
@@ -109,7 +115,7 @@ verification. Route names below are relative to that prefix.
 | Route | Description |
 |-------|-------------|
 | `/apps/dev-fleet/api/health` | Liveness + gateway **start identity**: `{status, start_id}`. `start_id` is the live unit's `ExecMainStartTimestampMonotonic` (launchd: job PID; foreground last resort: run-marker pid; `null` when unavailable); the dashboard polls it to detect the NEW process after a restart (see Action narration). Served on the proxied `/api/` namespace because the gateway only forwards `/apps/dev-fleet/api/*` to the backend. (The bare `/health` carries the same body but is HMAC-exempt and reached only by the gateway's own internal liveness poll.) |
-| `/apps/dev-fleet/api/fleet` | Lightweight worktree + pod list (polled every 12s). `?fresh=1` forces cache bypass. Answers `{worktrees: [], needs_setup: true}` when no main checkout was found (see Main Checkout Discovery) and `{worktrees: [], error}` when a named checkout is unreadable. |
+| `/apps/dev-fleet/api/fleet` | Lightweight worktree + pod list (polled every 12s), including `main_repo` and `main_repo_inferred`. `?fresh=1` forces cache bypass. Answers `{worktrees: [], needs_setup: true}` when no main checkout was found (see Main Checkout Discovery) and `{worktrees: [], error}` when a named checkout is unreadable. |
 | `/apps/dev-fleet/api/worktree?name=` | Lazy per-branch detail: PR, commits, disk usage |
 | `/apps/dev-fleet/api/pod/logs?name=&n=` | Pod journal tail (recent N lines, default 120) |
 | `/apps/dev-fleet/api/run?id=` | Async run status + streamed output (last 60 lines) |

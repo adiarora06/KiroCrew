@@ -86,6 +86,19 @@ async function openRowMenu() {
 describe('DevFleetPage row rendering helpers', () => {
   beforeEach(() => { vi.restoreAllMocks() })
 
+  it('surfaces the inferred main checkout once above the fleet', async () => {
+    installFetch({
+      ...fleetOf(MAIN_ROW),
+      main_repo: '/Users/dev/work/KiroCrew',
+      main_repo_inferred: true,
+    })
+    renderPage()
+    const note = await screen.findByTestId('inferred-main-checkout')
+    expect(note).toHaveTextContent('The primary checkout this fleet is discovered from')
+    expect(note).toHaveTextContent('/Users/dev/work/KiroCrew')
+    expect(screen.getAllByTestId('inferred-main-checkout')).toHaveLength(1)
+  })
+
   it('renders each relative-time bucket for the UPDATED column', async () => {
     // relTime() has four buckets past "just now"; the row strips the " ago"
     // suffix, so the column reads 5m / 3d / 2mo.

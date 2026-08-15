@@ -5567,6 +5567,17 @@ async def _fleet_with(worktrees, **patches):
 
 
 @pytest.mark.asyncio
+async def test_fleet_payload_marks_an_inferred_main_checkout():
+    with patch.object(mod, "MAIN_REPO_INFERRED", True):
+        fleet = await _fleet_with(
+            [{"path": mod.MAIN_REPO, "branch": "main", "is_main": True}]
+        )
+
+    assert fleet["main_repo"] == mod.MAIN_REPO
+    assert fleet["main_repo_inferred"] is True
+
+
+@pytest.mark.asyncio
 async def test_fleet_payload_discloses_why_pods_are_unavailable():
     """_POD_ERROR used to be computed and then read by NOTHING, so a non-Linux
     user got pod controls that silently failed. It must reach the payload."""
