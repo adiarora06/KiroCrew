@@ -14,6 +14,24 @@ All notable changes to KiroCrew are documented in this file.
   SSM mint paths; an explicit value applies to both transports, including a
   value equal to either transport's default. (#3566)
 
+- **Restarting a remote instance and diagnosing a connection failure now
+  honor the same connect budget the token mint already does, instead of a
+  hardcoded ~10s `ConnectTimeout`.** A user behind a slow ProxyCommand/jump
+  host who raised `instances.connect_timeout_secs` (or
+  `instances.mint_timeout_secs`) so the tunnel and mint would work still had
+  three sibling ssh call sites stuck at the old fail-fast default: the
+  dashboard's "restart remote" action (which pays the same proxy handshake
+  cost as the mint — it's the same one-shot ssh-exec shape), and the two
+  diagnostics probes (`ssh <host> true`, and the remote-dashboard `curl`
+  check), which would misreport a reachable-but-slow host as unreachable.
+  Restart now reuses the configured mint budget. Diagnostics reuse the
+  configured connect budget too, but capped at a new
+  `DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS` (15s): a diagnosis has its own UX
+  budget independent of how long a real connect is allowed to take, so a
+  user who tuned `connect_timeout_secs` up to, say, 90s for a genuinely slow
+  proxy still gets a diagnosis back in well under a minute rather than
+  silently inheriting the full tunable. (#3579)
+
 - **A Teams answer no longer gets silently truncated by a rate-limited
   chunk.** The Bot Framework Connector API enforces per-bot rate limits and
   can return HTTP 429, but the Teams outbound send raised immediately with

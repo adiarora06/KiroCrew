@@ -2797,6 +2797,31 @@ class TestTokenMintGeneric:
         rc, err = asyncio.run(tm.run_remote_kirocrew("cd-1", "restart"))
         assert rc == 0 and err == ""
 
+    def test_run_remote_kirocrew_honors_connect_timeout_secs(self, monkeypatch):
+        """#3579: the fail-fast 10s ConnectTimeout default must not silently
+        override a caller-supplied budget -- a restart on a slow-proxy host
+        needs the same connect budget the mint itself gets."""
+        from kiro_crew.instances import token_mint as tm
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", b""
+
+        captured = {}
+
+        async def fake_exec(*argv, **k):
+            captured["argv"] = argv
+            return FakeProc()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        rc, _ = asyncio.run(
+            tm.run_remote_kirocrew("cd-1", "restart", connect_timeout_secs=45.0)
+        )
+        assert rc == 0
+        assert "ConnectTimeout=45" in captured["argv"]
+
     def test_run_remote_kirocrew_redacts_stderr(self, monkeypatch):
         # Proxy-controlled stderr carrying a credential is redacted before return,
         # so a caller logging the tail cannot leak it.
@@ -2822,10 +2847,10 @@ class TestDiagnostics:
     def _set_probes(self, monkeypatch, ssh, remote, local):
         from kiro_crew.instances import diagnostics as diag
 
-        async def _ssh(h):
+        async def _ssh(h, connect_timeout_secs=10.0):
             return ssh
 
-        async def _rem(h, p):
+        async def _rem(h, p, connect_timeout_secs=10.0):
             return remote
 
         async def _loc(p):
@@ -2909,6 +2934,39 @@ class TestDiagnostics:
         assert asyncio.run(diag._probe_remote_dashboard("cd-1", 7777)) is True
         monkeypatch.setattr(asyncio, "create_subprocess_exec", mk(0, b"000"))
         assert asyncio.run(diag._probe_remote_dashboard("cd-1", 7777)) is False
+
+    def test_probes_honor_connect_timeout_secs(self, monkeypatch):
+        """#3579: the hardcoded ConnectTimeout=10 must not silently override a
+        caller-supplied budget -- a diagnosis on a slow-proxy host the user
+        already tuned instances.connect_timeout_secs for must not be
+        misreported as unreachable just because the probe never saw that
+        tuning."""
+        from kiro_crew.instances import diagnostics as diag
+
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+
+            async def wait(self):
+                return 0
+
+            async def communicate(self):
+                return (b"200", b"")
+
+        async def fake_exec(*argv, **k):
+            captured["argv"] = argv
+            return FakeProc()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        assert asyncio.run(diag._probe_ssh("cd-1", connect_timeout_secs=42.0)) is True
+        assert "ConnectTimeout=42" in captured["argv"]
+
+        assert (
+            asyncio.run(diag._probe_remote_dashboard("cd-1", 7777, connect_timeout_secs=42.0))
+            is True
+        )
+        assert "ConnectTimeout=42" in captured["argv"]
 
     def test_probe_local_forward(self):
         from kiro_crew.instances import diagnostics as diag
@@ -3312,20 +3370,54 @@ class TestSelfHealRefreshRestart:
         reg.add(name="Bad", ssh_host="-obadhost", instance_id="bad")
         calls = {}
 
-        async def fake_run(host, sub, *, remote_bin="", marker_port=None, timeout_secs=60.0):
-            calls["a"] = (host, sub, marker_port)
+        async def fake_run(
+            host, sub, *, remote_bin="", marker_port=None, timeout_secs=60.0,
+            connect_timeout_secs=10.0,
+        ):
+            calls["a"] = (host, sub, marker_port, connect_timeout_secs)
             return (0, "")
 
         monkeypatch.setattr(stm, "run_remote_kirocrew", fake_run)
         r = asyncio.run(mgr.restart_remote("cd-1"))
         # remote_port defaults to 7777 → threaded so restart uses the marker resolver.
-        assert r["ok"] and calls["a"] == ("cd-1-alias", "restart", 7777)
+        # connect_timeout_secs comes from the configured mint budget (unset here,
+        # so the ssh default from constants.DEFAULT_MINT_TIMEOUT_SECS), not the
+        # 10s ssh-exec fail-fast fallback -- this is the fix for #3579: a restart
+        # on a slow-proxy host must reuse the same budget the mint itself gets.
+        assert r["ok"] and calls["a"] == ("cd-1-alias", "restart", 7777, 30.0)
         # validation failure
         r = asyncio.run(mgr.restart_remote("bad"))
         assert not r["ok"] and "invalid ssh settings" in r["message"]
         # unknown
         r = asyncio.run(mgr.restart_remote("ghost"))
         assert not r["ok"]
+
+    def test_diagnose_caps_connect_timeout_at_the_diagnostics_ceiling(
+        self, tmp_path, monkeypatch
+    ):
+        """#3579: a user who raised instances.connect_timeout_secs for a
+        genuinely slow proxy still wants a diagnosis to resolve in well
+        under a minute, not silently inherit the full tunable -- diagnose()
+        must cap what it forwards, not pass the configured value straight
+        through."""
+        from kiro_crew.instances import ssh_tunnel_manager as stm
+
+        reg, mgr = self._mgr(tmp_path)
+        reg.add(name="CD", ssh_host="cd-1-alias", instance_id="cd-1")
+        mgr._connect_timeout = 90.0  # well above the diagnostics cap
+        captured = {}
+
+        async def fake_diagnose(ssh_host, remote_port, local_port, connect_timeout_secs=10.0):
+            captured["connect_timeout_secs"] = connect_timeout_secs
+            from kiro_crew.instances.diagnostics import OK, DiagnosisResult
+
+            return DiagnosisResult(OK, "ok", [])
+
+        monkeypatch.setattr(stm, "diagnose_instance", fake_diagnose)
+        result = asyncio.run(mgr.diagnose("cd-1"))
+        assert result is not None
+        assert captured["connect_timeout_secs"] == stm._DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS
+        assert captured["connect_timeout_secs"] < 90.0
 
     def test_probe_loop_tears_down_after_threshold(self, tmp_path, monkeypatch):
         from kiro_crew.instances import ssh_tunnel_manager as stm

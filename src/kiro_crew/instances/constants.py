@@ -88,6 +88,15 @@ DEFAULT_SSM_CONNECT_TIMEOUT_SECS: float = 25.0
 # generous enough for any realistic proxy chain while still bounding the wait.
 CONNECT_TIMEOUT_CEILING_SECS: float = 120.0
 
+# Cap on the ssh ConnectTimeout the diagnostics probes (_probe_ssh,
+# _probe_remote_dashboard) borrow from instances.connect_timeout_secs. The
+# tunable above is sized for how long a slow-proxy CONNECT should be allowed
+# to take — a diagnosis is a different use case with its own UX budget: a user
+# who tuned connect_timeout_secs up to, say, 90s for a genuinely slow proxy
+# still wants a diagnosis to resolve in well under a minute, not silently
+# inherit the full tunable. Diagnostics use min(configured, this).
+DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS: float = 15.0
+
 # How long (secs) to wait for the remote `kirocrew token` to return before
 # giving up on a mint attempt. The mint runs over the same ssh transport as the
 # tunnel itself, so a host behind a ProxyCommand or jump host pays the proxy

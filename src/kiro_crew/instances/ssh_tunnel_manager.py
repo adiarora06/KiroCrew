@@ -87,6 +87,9 @@ from kiro_crew.instances.constants import DEFAULT_TOKEN_REFRESH_FRACTION as _REF
 from kiro_crew.instances.constants import (
     DEFAULT_TUNNEL_BASE_PORT,
 )
+from kiro_crew.instances.constants import (
+    DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS as _DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS,
+)
 from kiro_crew.instances.diagnostics import diagnose_instance, diagnose_instance_ssm
 from kiro_crew.instances.port_allocator import PortAllocator, _is_port_free
 from kiro_crew.instances.registry import _UNALLOCATED_PORT, Instance, InstancesRegistry
@@ -1546,7 +1549,14 @@ class SshTunnelManager:
                 ssm_run_as=inst.ssm_run_as,
             )
         else:
-            result = await diagnose_instance(inst.ssh_host, inst.remote_port, local_port)
+            result = await diagnose_instance(
+                inst.ssh_host,
+                inst.remote_port,
+                local_port,
+                connect_timeout_secs=min(
+                    self._connect_timeout_for("ssh"), _DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS
+                ),
+            )
         diag = result.to_dict()
         # Re-fetch the tunnel (it may have changed during the probes) and attach.
         tunnel = self._tunnels.get(instance_id)
@@ -1590,6 +1600,7 @@ class SshTunnelManager:
                 "restart",
                 remote_bin=params.remote_bin,
                 marker_port=inst.remote_port,
+                connect_timeout_secs=self._mint_timeout_for(params.method),
             )
         if rc == 0:
             logger.info("Restarted remote gateway for %s", instance_id)
