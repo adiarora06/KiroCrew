@@ -175,7 +175,8 @@ describe('steer default while sub-agents run', { timeout: 20_000 }, () => {
   })
 
   it('honours an explicit Queue choice and leaves the flag off', async () => {
-    localStorage.setItem('mc-busy-send-mode', 'queue')
+    // Per-session key (#3821) — this harness renders with activeSlot 'slot-a'.
+    localStorage.setItem('mc-busy-send-mode:slot-a', 'queue')
     const { input } = await renderChat({ subagentsRunning: true, turnRunning: false })
     await typeAndSubmit(input, 'run this after the wave')
 

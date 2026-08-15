@@ -41,28 +41,49 @@ const BUSY_SEND_MODES: Array<{ mode: BusySendMode; icon: React.ReactNode }> = [
   { mode: 'queue', icon: <ArrowUpFromLine size={15} /> },
 ]
 
-export function readBusySendMode(): BusySendMode {
-  try { return localStorage.getItem(BUSY_SEND_MODE_LS_KEY) === 'queue' ? 'queue' : 'steer' } catch { return 'steer' }
+/** Per-session storage key. Empty ``slotKey`` (no session yet — a fresh,
+ *  unsaved composer) falls into its own consistent bucket rather than
+ *  reading/writing a real session's key. */
+function busySendModeLsKey(slotKey: string): string {
+  return `${BUSY_SEND_MODE_LS_KEY}:${slotKey}`
 }
 
-/** Live subscribers to the persisted mode. "What does Enter do while busy" is
- *  ONE user preference, so every composer showing this button (main chat and the
- *  side panel) must move together the moment it changes — localStorage alone
- *  only syncs across tabs, never within one. */
-const modeListeners = new Set<(m: BusySendMode) => void>()
+export function readBusySendMode(slotKey: string): BusySendMode {
+  try {
+    return localStorage.getItem(busySendModeLsKey(slotKey)) === 'queue' ? 'queue' : 'steer'
+  } catch { return 'steer' }
+}
 
-/** Read + write the shared busy-send preference. Every mounted consumer updates
- *  on a change from any other consumer. */
-export function useBusySendMode(): [BusySendMode, (m: BusySendMode) => void] {
-  const [mode, setMode] = useState<BusySendMode>(readBusySendMode)
+/** Live subscribers to the persisted mode, keyed by session slot. "What does
+ *  Enter do while busy" is ONE preference PER SESSION, so every composer
+ *  showing this button for the SAME slot (main chat and the side panel) must
+ *  move together the moment it changes — localStorage alone only syncs
+ *  across tabs, never within one — but a change in one session's slot must
+ *  never leak into a different session's composer (#3821). */
+const modeListeners = new Map<string, Set<(m: BusySendMode) => void>>()
+
+/** Read + write the busy-send preference for one session. Every mounted
+ *  consumer sharing that session's slot updates on a change from any other
+ *  consumer of the SAME slot. */
+export function useBusySendMode(slotKey: string): [BusySendMode, (m: BusySendMode) => void] {
+  const [mode, setMode] = useState<BusySendMode>(() => readBusySendMode(slotKey))
   useEffect(() => {
-    modeListeners.add(setMode)
-    return () => { modeListeners.delete(setMode) }
-  }, [])
+    // Re-sync on mount AND whenever the pane is reassigned to a different
+    // slot (e.g. the session grid recycling a pane) — the mode captured at
+    // the PREVIOUS slot must not linger as this slot's displayed value.
+    setMode(readBusySendMode(slotKey))
+    let listeners = modeListeners.get(slotKey)
+    if (!listeners) { listeners = new Set(); modeListeners.set(slotKey, listeners) }
+    listeners.add(setMode)
+    return () => {
+      listeners!.delete(setMode)
+      if (listeners!.size === 0) modeListeners.delete(slotKey)
+    }
+  }, [slotKey])
   const publish = useCallback((m: BusySendMode) => {
-    safeSetItem(BUSY_SEND_MODE_LS_KEY, m)
-    for (const fn of modeListeners) fn(m)
-  }, [])
+    safeSetItem(busySendModeLsKey(slotKey), m)
+    for (const fn of modeListeners.get(slotKey) ?? []) fn(m)
+  }, [slotKey])
   return [mode, publish]
 }
 

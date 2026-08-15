@@ -4,6 +4,22 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Steer / Queue mode is now a per-session preference instead of a global
+  one.** Switching a session's composer to Queue via the split-button
+  dropdown immediately flipped every other open session to Queue too:
+  `useBusySendMode` persisted to a single global `mc-busy-send-mode`
+  localStorage key and broadcast every change to one flat set of listeners
+  holding every mounted composer. A user who habitually queues for a
+  long-running task, then switches to Steer for a quick question in another
+  session, silently changed the long-running session's send behavior. The
+  key is now scoped per session slot (`mc-busy-send-mode:<slot>`) and the
+  listener fanout is keyed by slot, so the two composers that legitimately
+  share a session (main chat and its side panel) still move together
+  instantly — the behavior the global set existed for — while a different
+  session is never touched. A pane reassigned to a different slot re-reads
+  that slot's own stored mode rather than carrying the previous session's
+  value over. (#3821)
+
 - **Opted-in MCP servers no longer silently fall back to unpooled backends.**
   On one live host, 988 degradations accrued in 15 hours with no signal: 79%
   were guaranteed-ENOENT pooled spawns of bare commands the gateway daemon's

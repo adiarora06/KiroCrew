@@ -76,7 +76,7 @@ export default function SideChat({ slot }: { slot: string }) {
   const messages = reduxSide?.messages ?? []
   const isPending = reduxSide?.pending ?? false
   const queue = reduxSide?.queue ?? []
-  const [busySendMode, setBusySendMode] = useBusySendMode()
+  const [busySendMode, setBusySendMode] = useBusySendMode(slot)
   // A turn is in flight, so a submit can no longer just start one. Derived from
   // the same signal the thinking indicator uses, so the composer's affordance and
   // what the server will actually do can't disagree.

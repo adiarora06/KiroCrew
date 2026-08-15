@@ -1279,7 +1279,9 @@ describe('ChatInput', () => {
       renderWithProviders(<ChatInput {...p} />)
       fireEvent.click(screen.getByTestId('busy-send-caret'))
       fireEvent.click(screen.getByTestId('busy-send-mode-queue'))
-      expect(localStorage.getItem('mc-busy-send-mode')).toBe('queue')
+      // Per-session key (#3821): the store's default activeSlot is null, so
+      // ChatInput binds to the empty-slot bucket here.
+      expect(localStorage.getItem('mc-busy-send-mode:')).toBe('queue')
       const main = screen.getByTestId('busy-send-button')
       expect(main).toHaveAttribute('aria-label', 'Queue message')
       fireEvent.click(main)
@@ -1290,9 +1292,29 @@ describe('ChatInput', () => {
     })
 
     it('restores persisted queue mode from localStorage', () => {
-      safeSetItem('mc-busy-send-mode', 'queue')
+      safeSetItem('mc-busy-send-mode:', 'queue')
       renderWithProviders(<ChatInput {...runningProps()} />)
       expect(screen.getByTestId('busy-send-button')).toHaveAttribute('aria-label', 'Queue message')
+    })
+
+    it('does not inherit another session slot\'s persisted mode (#3821)', () => {
+      // A DIFFERENT session was switched to queue. This composer (bound to the
+      // default/empty slot) must still open in steer: the preference is
+      // per-session, so one session's choice cannot silently change another's
+      // send behavior.
+      safeSetItem('mc-busy-send-mode:some-other-slot', 'queue')
+      renderWithProviders(<ChatInput {...runningProps()} />)
+      expect(screen.getByTestId('busy-send-button')).toHaveAttribute('aria-label', 'Steer')
+    })
+
+    it('switching to Queue writes only this session\'s key (#3821)', () => {
+      safeSetItem('mc-busy-send-mode:some-other-slot', 'steer')
+      renderWithProviders(<ChatInput {...runningProps()} />)
+      fireEvent.click(screen.getByTestId('busy-send-caret'))
+      fireEvent.click(screen.getByTestId('busy-send-mode-queue'))
+      expect(localStorage.getItem('mc-busy-send-mode:')).toBe('queue')
+      // The other session is untouched — the original bug was this flipping too.
+      expect(localStorage.getItem('mc-busy-send-mode:some-other-slot')).toBe('steer')
     })
 
     it('dropdown is keyboard operable: focus on open, arrows roam, Escape returns to caret', async () => {
