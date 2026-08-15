@@ -2258,7 +2258,11 @@ export const api = {
   // `dashboard:ui` placeholder makes the server fall back to "the one project
   // every slot shares", so workspace skills leak between chats on different
   // projects and vanish entirely when two chats disagree (#2457, #3551).
-  skills: (sessionKey?: string) => get('/api/skills', sessionKey).then(j),
+  // agent, when given, scopes the listing to that agent's own skill:// mapping;
+  // an agent with no explicit mapping keeps the unfiltered listing.
+  skills: (sessionKey?: string, agent?: string) =>
+    get('/api/skills' + (agent ? '?agent=' + encodeURIComponent(agent) : ''),
+        sessionKey).then(j),
   /** Project-skills trust: this chat's grant state plus every stored grant. */
   skillTrust: (sessionKey?: string) => get('/api/skills/-/trust', sessionKey).then(j),
   /** Grant trust to THIS chat's project. The server takes the directory from

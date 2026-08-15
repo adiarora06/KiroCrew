@@ -1314,8 +1314,8 @@ function ChatInput({
   // `$` trigger renders the picker instantly (the fetch is the only latency).
   // prefetchQuery is a no-op if the cache is already fresh (staleTime), so it's
   // cheap to call on every focus. The key and the session key must match
-  // SkillPickerMenu's exactly, or the prefetch warms a different entry and the
-  // menu still pays the fetch on open.
+  // SkillPickerMenu's exactly — including the trailing agent segment — or the
+  // prefetch warms a different entry and the menu still pays the fetch on open.
   const queryClient = useQueryClient()
   const skillSlotKey = slotId ? `dashboard:${slotId}` : undefined
   const skillSlotKeyRef = useRef(skillSlotKey)
@@ -1324,11 +1324,11 @@ function ChatInput({
   skillProjectRef.current = project
   const prefetchSkills = useCallback(() => {
     queryClient.prefetchQuery({
-      queryKey: ['skills', skillSlotKey ?? null, project ?? null],
-      queryFn: () => api.skills(skillSlotKey),
+      queryKey: ['skills', skillSlotKey ?? null, project ?? null, agentName ?? null],
+      queryFn: () => api.skills(skillSlotKey, agentName),
       staleTime: skillsCacheStaleTime(project),
     })
-  }, [queryClient, skillSlotKey, project])
+  }, [queryClient, skillSlotKey, project, agentName])
   // Shared caret-relative token insertion for the @/$ pickers: replace the
   // sigil-token ending at the caret with `token`, commit, and restore the caret
   // just after it. One copy keeps the two onSelect handlers duplication-free.
@@ -2940,6 +2940,7 @@ function ChatInput({
         sendOnEnter={sendOnEnter}
         slotKey={skillSlotKey}
         project={project}
+        agent={agentName}
         onSelect={({ leaf }) => {
           // Token left literal — backend appends the skill body; the user still
           // sees their $token marker. Caret-relative replace via shared helper.
