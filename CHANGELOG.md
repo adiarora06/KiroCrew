@@ -13,6 +13,26 @@ All notable changes to KiroCrew are documented in this file.
   everything after it, with only a backend log line. Outbound sends now
   retry once on 429, honoring the Connector API's `Retry-After` header. (#3738)
 
+- **Telegram slash commands (`/new`, `/compact`, `/model`, `/yolo`, `/link`,
+  `/unlink`, `/stop`, `/help`, `/queue`, `/steer`) no longer silently break
+  in a group or forum-topic chat — without executing a command addressed to
+  a different bot in the same group.** Telegram's own clients append
+  `@BotUsername` to a slash command in any chat with more than one
+  participant/bot — standard client behavior triggered by registering a
+  command menu, not something the bot's UI controls — but the command
+  parser matched the raw token verbatim against alias sets defined without
+  that suffix. In the forum-topic supergroups this integration explicitly
+  supports, every command fell through to being sent to the LLM as ordinary
+  chat text with no error. A trailing `@BotUsername` is now stripped before
+  alias matching — but only when it names THIS bot: Telegram fans a command
+  addressed to a different bot in the same group out to every bot present
+  (Bot API convention is to ignore what isn't addressed to you), so
+  stripping any mention unconditionally would let e.g. `/yolo@OtherBot on`
+  match this bot's own alias and enable auto-approval here. The gateway now
+  resolves its own username via `getMe` at startup and only strips a mention
+  that matches it (case-insensitively); any other mention, or none resolved
+  yet, is left attached and falls through as unrecognized. (#3734)
+
 - **A folder knowledge source added from the dashboard can now be started.**
   The row's `sync_status` was stored twice — as a table column and inside the
   properties JSON — and the create path wrote `pending_confirmation` only into
