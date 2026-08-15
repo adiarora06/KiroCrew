@@ -211,7 +211,17 @@ export function Preview({
     textStyle?: CSSProperties,
     opts?: { split?: boolean },
   ): ReactNode => {
-    if (editRange && start === editRange.start) {
+    // `editRange.end < start` is the trailing append slot's insertion
+    // signature (see its own `onStartEdit(appendStart, appendStart - 1)`
+    // below), never a real per-line edit -- every other caller of
+    // `onStartEdit` in this file passes `end >= start`. Without this guard,
+    // a note whose `appendStart` lands on the phantom trailing line this
+    // loop ALSO renders as its own block (any trailing-newline-terminated
+    // note, i.e. the common case) double-mounts a BlockEditor here AND in
+    // the append slot for the same click; the second one's autofocus blurs
+    // the first, whose blur-commit resets `editRange` to null and unmounts
+    // both before the user can type.
+    if (editRange && start === editRange.start && editRange.end >= editRange.start) {
       return (
         <BlockEditor
           key={`edit-${start}`}
@@ -488,9 +498,29 @@ export function Preview({
 
   // Trailing click-to-append region: clicking the empty space below the note
   // starts a new block at the end (an insertion — editRange with end < start).
-  const appendStart = lines.length
+  //
+  // `lines.length` alone over-counts by one whenever `body` ends with `\n`
+  // (or is empty): String.split produces a trailing empty element for the
+  // text AFTER the final newline, which is not a real line of content. Using
+  // it as the insertion index landed new text one slot past where
+  // `commitBlockEdit`/`splitBlockEdit` (MdNotebookPage.tsx) splice against
+  // their OWN `contentRef.current.split('\n')` — inserting AFTER that
+  // phantom empty element instead of at it, so every append to a
+  // trailing-newline-terminated note (the common case for anything that's
+  // been through git) silently wrote an extra blank line before the new
+  // text. Subtracting the phantom element here keeps this index aligned
+  // with the "number of real lines" both sides actually agree on.
+  const appendStart = body === '' ? 0 : lines.length - (body.endsWith('\n') ? 1 : 0)
+  // `editRange.start === appendStart` alone is not enough to identify a
+  // click on THIS slot: whenever `appendStart` lands on the phantom trailing
+  // line's own index (any trailing-newline-terminated note), a genuine
+  // same-line edit of that line ALSO carries `start === appendStart` (with
+  // `end === start`, not an insertion). Requiring the insertion signature
+  // here keeps that click confined to `blk()`'s own editor above instead of
+  // double-mounting this one too.
+  const isAppendInsertion = !!editRange && editRange.start === appendStart && editRange.end < appendStart
   out.push(
-    editRange && editRange.start === appendStart ? (
+    isAppendInsertion ? (
       <BlockEditor
         key="edit-append"
         initial=""

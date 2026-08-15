@@ -4,6 +4,25 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Notes: appending text to a note whose file ends with a trailing newline
+  no longer inserts a spurious blank line — and clicking to append no longer
+  flashes an editor shut before you can type into it.** `String.split('\n')`
+  produces a trailing empty element whenever the body ends with `\n` — not a
+  real line of content — and the click-below-to-append insertion point
+  counted it as one, landing new text one slot past where the actual splice
+  happens. Any note whose file ends in `\n` (the common case for anything
+  checked out of a git-backed vault) silently gained an extra blank line on
+  every append; a brand-new empty note gained a leading one instead.
+  Realigning the insertion index with that phantom line's own position
+  (rather than one slot past it) introduced a second issue: `Preview` also
+  renders that phantom line as its own clickable block, so once the
+  insertion index landed on the same index, a click on either the append
+  region or that phantom line itself double-mounted a block editor there —
+  the second one's autofocus stole focus from the first, whose blur-commit
+  reset the edit state and unmounted both before a keystroke could land.
+  Both consumers of the shared index now require its distinct signature
+  (an insertion, not a same-line edit) before opening an editor. (#3741)
+
 - **A folder knowledge source added from the dashboard can now be started.**
   The row's `sync_status` was stored twice — as a table column and inside the
   properties JSON — and the create path wrote `pending_confirmation` only into
