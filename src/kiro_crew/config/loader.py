@@ -6057,7 +6057,9 @@ class KiroCrewConfig:
                     agent_data.get("tool_search_min_tokens", 50000), 50000
                 ),
                 session_sharing=bool(agent_data.get("session_sharing", True)),
-                max_subagents=agent_data.get("max_subagents", 0),
+                max_subagents=_safe_int(
+                    agent_data.get("max_subagents", 0), 0, 0, SUBAGENT_AUTO_MAX_CEILING
+                ),
                 max_stop_hook_nudges=_safe_int(
                     agent_data.get("max_stop_hook_nudges", 100), 100, 0
                 ),
@@ -6086,7 +6088,9 @@ class KiroCrewConfig:
                 subagent_cpu_cost_cores=_safe_float(
                     agent_data.get("subagent_cpu_cost_cores", 1.0), 1.0
                 ),
-                subagent_auto_max=_safe_int(agent_data.get("subagent_auto_max", 32), 32),
+                subagent_auto_max=_safe_int(
+                    agent_data.get("subagent_auto_max", 32), 32, 3, SUBAGENT_AUTO_MAX_CEILING
+                ),
                 subagent_spawn_stagger_secs=_safe_float(
                     agent_data.get("subagent_spawn_stagger_secs", 2.0), 2.0
                 ),
@@ -6094,7 +6098,9 @@ class KiroCrewConfig:
                 resource_pressure_gb=_safe_float(agent_data.get("resource_pressure_gb", 4.0), 4.0),
                 resource_critical_gb=_safe_float(agent_data.get("resource_critical_gb", 2.0), 2.0),
                 admission_gate=_safe_bool(agent_data.get("admission_gate"), True),
-                subagent_max_turns=agent_data.get("subagent_max_turns", 100),
+                subagent_max_turns=_safe_int(
+                    agent_data.get("subagent_max_turns", 100), 100, 1, SUBAGENT_MAX_TURNS_CEILING
+                ),
                 subagent_timeout_secs=agent_data.get("subagent_timeout_secs", 1800),
                 subagent_stall_idle_secs=_safe_int(
                     agent_data.get("subagent_stall_idle_secs", 120), 120
@@ -6134,7 +6140,7 @@ class KiroCrewConfig:
                     session_data.get("empty_response_auto_continue", True)
                 ),
                 autocompact_pct=_safe_float(session_data.get("autocompact_pct", 90.0), 90.0),
-                pool_size=_safe_int(session_data.get("pool_size", 2), 2),
+                pool_size=_safe_int(session_data.get("pool_size", 2), 2, 0, POOL_SIZE_MAX),
                 pool_agent=str(session_data.get("pool_agent", "")),
                 pool_ttl_secs=_safe_int(session_data.get("pool_ttl_secs", 1800), 1800),
                 eager_spawn=bool(session_data.get("eager_spawn", True)),
