@@ -2379,9 +2379,9 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     for _app_srv, _app_spec in _collect_app_mcp_servers().items():
         if _app_srv not in managed_names:
             config.setdefault("mcpServers", {})[_app_srv] = _app_spec
-            # MOUNT it: a server present only in `mcpServers` is defined but never
-            # referenced, so kiro-cli never loads it and the app's tools are
-            # silently unavailable. `tools` is the unconditional mount (the final
+            # EXPOSE it: kiro-cli connects entries declared in `mcpServers`, but
+            # an unreferenced server contributes no tools to the agent. `tools`
+            # is the unconditional exposure list (the final
             # dedup below removes any duplicate); auto-approve stays governed —
             # the spec's `autoApprove` was already ceiling-filtered in
             # _collect_app_mcp_servers, and the final allowedTools pass covers the

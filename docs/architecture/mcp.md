@@ -353,6 +353,12 @@ request, so one dead entry surfaces as a transient 5xx and then a hard error for
 **all** requests, not just that app's. The enable path re-registers with the
 real port once the backend is up.
 
+Connection and tool exposure are separate. An entry in `mcpServers` is still
+connected even when it has no matching `@server` reference in `tools`; omitting
+the reference hides that server's tools from the agent but does not avoid the
+process or connection cost. Isolation and feature gates that must avoid that
+cost therefore remove the server entry itself as well as its tool reference.
+
 An app agent that references a host-managed server (`@kirocrew-core`,
 `@kirocrew-cron`) in its `tools` gets the launch spec copied in by
 `_materialize_managed_refs()`. kiro-cli resolves a `@server` ref against the
