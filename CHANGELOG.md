@@ -4,6 +4,22 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **`install.sh` no longer builds the dashboard against an unsupported
+  Node, leaving a "Dashboard HTML not found" page.** The Node ladder's
+  first branch tested `has node` alone, so a system Node below the
+  supported floor satisfied it and every install branch — apt/dnf/brew AND
+  nvm — was skipped. On Amazon Linux 2023 (Node 18) the frontend build then
+  ran under an unsupported interpreter, emitted only `EBADENGINE` warnings,
+  and produced no usable `dist/`; the launch still reported success because
+  the Python gateway answers `/api/health` without a frontend, so the first
+  symptom was a broken dashboard at first open. Detection now consults the
+  floor via a `node_supported()` helper: an under-floor Node falls through
+  to the install ladder (distro package first, then nvm) instead of being
+  accepted. The bundle build also sets a default
+  `NODE_OPTIONS=--max-old-space-size=8192`, since V8's ~2 GB default is not
+  enough for this module graph and the OOM surfaces as a build that dies
+  with no clear cause. (#3220)
+
 - **Opted-in MCP servers no longer silently fall back to unpooled backends.**
   On one live host, 988 degradations accrued in 15 hours with no signal: 79%
   were guaranteed-ENOENT pooled spawns of bare commands the gateway daemon's
