@@ -4,21 +4,19 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
-- **`install.sh` no longer builds the dashboard against an unsupported
-  Node, leaving a "Dashboard HTML not found" page.** The Node ladder's
-  first branch tested `has node` alone, so a system Node below the
-  supported floor satisfied it and every install branch — apt/dnf/brew AND
-  nvm — was skipped. On Amazon Linux 2023 (Node 18) the frontend build then
-  ran under an unsupported interpreter, emitted only `EBADENGINE` warnings,
-  and produced no usable `dist/`; the launch still reported success because
-  the Python gateway answers `/api/health` without a frontend, so the first
-  symptom was a broken dashboard at first open. Detection now consults the
-  floor via a `node_supported()` helper: an under-floor Node falls through
-  to the install ladder (distro package first, then nvm) instead of being
-  accepted. The bundle build also sets a default
-  `NODE_OPTIONS=--max-old-space-size=8192`, since V8's ~2 GB default is not
-  enough for this module graph and the OOM surfaces as a build that dies
-  with no clear cause. (#3220)
+- **`test_redaction_timing_scales_linearly` no longer fails CI
+  intermittently** (observed "Redaction scaled super-linearly: 3.2x, limit
+  3.0x" on an otherwise-healthy matcher). The test took ONE
+  `perf_counter` sample per input size, so it billed itself for whatever
+  the OS gave the core to the sibling pytest-xdist workers — and one
+  unlucky reading of the SMALL input, the ratio's denominator, was enough
+  to push it over the bound. It now measures with `time.thread_time()`
+  (redaction is single-threaded pure-regex work, so per-thread CPU is its
+  complete cost) and takes best-of-3 per size, since scheduler noise only
+  ever adds and the minimum is the closest estimate of the true cost —
+  the same two techniques `TestIsDeniedReDoSResistance` already uses for
+  this class of assertion. The 3.0x bound is unchanged and detection is
+  intact: a genuinely quadratic implementation still measures ~4.3x.
 
 - **Opted-in MCP servers no longer silently fall back to unpooled backends.**
   On one live host, 988 degradations accrued in 15 hours with no signal: 79%
@@ -57,24 +55,6 @@ All notable changes to KiroCrew are documented in this file.
   to [10, 120]) now threads through the tunnel manager to both the SSH and
   SSM mint paths; an explicit value applies to both transports, including a
   value equal to either transport's default. (#3566)
-
-- **Restarting a remote instance and diagnosing a connection failure now
-  honor the same connect budget the token mint already does, instead of a
-  hardcoded ~10s `ConnectTimeout`.** A user behind a slow ProxyCommand/jump
-  host who raised `instances.connect_timeout_secs` (or
-  `instances.mint_timeout_secs`) so the tunnel and mint would work still had
-  three sibling ssh call sites stuck at the old fail-fast default: the
-  dashboard's "restart remote" action (which pays the same proxy handshake
-  cost as the mint — it's the same one-shot ssh-exec shape), and the two
-  diagnostics probes (`ssh <host> true`, and the remote-dashboard `curl`
-  check), which would misreport a reachable-but-slow host as unreachable.
-  Restart now reuses the configured mint budget. Diagnostics reuse the
-  configured connect budget too, but capped at a new
-  `DIAGNOSTICS_CONNECT_TIMEOUT_CAP_SECS` (15s): a diagnosis has its own UX
-  budget independent of how long a real connect is allowed to take, so a
-  user who tuned `connect_timeout_secs` up to, say, 90s for a genuinely slow
-  proxy still gets a diagnosis back in well under a minute rather than
-  silently inheriting the full tunable. (#3579)
 
 - **A Teams answer no longer gets silently truncated by a rate-limited
   chunk.** The Bot Framework Connector API enforces per-bot rate limits and
