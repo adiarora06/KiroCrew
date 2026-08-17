@@ -508,6 +508,29 @@ class TestIsDeniedReDoSResistance:
     #: separating linear from quadratic (4.0) and from anything exponential.
     _MAX_DOUBLING_RATIO = 3.0
 
+    #: Base size for the doubling-ratio measurement, chosen so the SIGNAL dominates CI noise
+    #: rather than by widening the bound (which would be the weakened assertion AGENTS.md
+    #: forbids as a flake fix).
+    #:
+    #: The arithmetic, from measurements on an idle machine — the ratio itself is stable at
+    #: 2.00 (min 1.99 / max 2.02 over 5 rounds) at every size, so the failures were never
+    #: about shape, only about how little work was being timed:
+    #:
+    #:   n=2000  -> 32ms at n, 65ms at 2n
+    #:   n=8000  -> 131ms at n, 262ms at 2n
+    #:
+    #: A ratio of (2c + N)/c stays under 3.0 only while the added noise N stays under c, so
+    #: the small sample's cost IS the noise budget. The two reported flakes (3.13x and 3.31x)
+    #: imply N ≈ 36–42ms against a c of 32ms — noise slightly exceeding the budget, exactly
+    #: as predicted. At 8000 the budget is 131ms: ~3x the worst observed noise, with the 3.0
+    #: bound untouched and still separating linear from quadratic.
+    #:
+    #: The cost is runtime (~2.4s bare for this test, up from ~0.6s; more under coverage).
+    #: That is the price of measuring something big enough to be measurable — and it buys a
+    #: bound that means what it says. The ABSOLUTE budget assertion deliberately stays at the
+    #: cheap n=2000 point, where it has always had real margin.
+    _RATIO_BASE_N = 8000
+
     @staticmethod
     def _cpu_cost(fn: Callable[[], object]) -> float:
         """CPU consumed by THIS thread while ``fn`` runs — the cost chokepoint.
@@ -668,11 +691,50 @@ class TestIsDeniedReDoSResistance:
             lambda n: "/.ssh/ open " + ("python open " * n),
         ):
             assert self._elapsed(build(2000)) < self._BUDGET_SECONDS
-            ratio = self._doubling_ratio(build, 2000)
+            ratio = self._doubling_ratio(build, self._RATIO_BASE_N)
             assert ratio < self._MAX_DOUBLING_RATIO, (
                 f"cost grew {ratio:.1f}x when the input doubled — linear is ~2x, so this "
                 "is the super-linear backtracking the fragment split exists to prevent"
             )
+
+    #: Worst added-noise implied by the two reported CI flakes (3.13x and 3.31x against a
+    #: 32ms small sample): (2c + N)/c = 3.31 with c = 32ms gives N ≈ 42ms.
+    _OBSERVED_CI_NOISE_SECONDS = 0.042
+
+    def test_the_ratio_base_size_outruns_the_noise_that_made_it_flaky(self):
+        """The base size, not the bound, is what has to absorb CI noise (#3938).
+
+        The ratio is (2c + N)/c for an added noise N, so it stays under the 3.0
+        bound only while N stays under the small sample's own cost c — i.e. c IS
+        the noise budget. This measures c on the machine actually running the
+        suite and asserts the budget clears the worst noise CI has reported,
+        with margin.
+
+        Written as a test rather than a comment because the constant it guards is
+        a number someone could later "tidy" back down to save runtime, silently
+        restoring the flake. Widening ``_MAX_DOUBLING_RATIO`` instead would be
+        the weakened assertion AGENTS.md forbids as a flake fix; this keeps the
+        bound and buys the margin with signal.
+        """
+        build = lambda n: "/.ssh/ " + ("python open " * n)  # noqa: E731
+        c = min(self._elapsed(build(self._RATIO_BASE_N)) for _ in range(3))
+        assert c > self._OBSERVED_CI_NOISE_SECONDS * 2, (
+            f"the {self._RATIO_BASE_N}-token sample costs only {c * 1000:.0f}ms, so a "
+            f"{self._OBSERVED_CI_NOISE_SECONDS * 1000:.0f}ms CI hiccup would push the "
+            "doubling ratio past its bound — raise _RATIO_BASE_N, do not raise the bound"
+        )
+
+    def test_the_doubling_bound_still_rejects_quadratic_growth(self):
+        """Raising the base must not have blunted what the bound detects.
+
+        A synthetic quadratic cost has to fail the same assertion the real test
+        makes, so the bound is still separating shapes rather than just passing.
+        """
+        quadratic = {self._RATIO_BASE_N: 1.0, self._RATIO_BASE_N * 2: 4.0}
+        ratio = quadratic[self._RATIO_BASE_N * 2] / quadratic[self._RATIO_BASE_N]
+        assert ratio >= self._MAX_DOUBLING_RATIO, (
+            "quadratic growth (4x on a doubling) must not fit under the bound"
+        )
 
     def test_long_leading_junk_then_real_deny_needle_still_caught(self):
         # A legitimate destructive command sits AFTER a long junk prefix in its

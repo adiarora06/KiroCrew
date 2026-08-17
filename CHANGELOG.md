@@ -4,6 +4,18 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **`TestIsDeniedReDoSResistance::test_mid_dotstar_chain_spam_stays_linear` no
+  longer flakes on unrelated PRs** (observed 3.13x and 3.31x against a 3.0
+  bound, on two platforms, both on frontend-only diffs, both clearing on a
+  same-SHA rerun). The bound was not the problem and has not moved: the ratio
+  measures 2.00 on an idle machine at every input size. The problem was how
+  little work was being timed — at the old base the small sample cost ~32ms,
+  and since the ratio is `(2c + N)/c` for added noise `N`, that 32ms WAS the
+  entire noise budget. The reported failures imply ~36–42ms of CI noise, i.e.
+  just over budget. The measurement base is raised so the small sample costs
+  ~131ms, giving roughly 3x the worst observed noise while the 3.0 bound still
+  separates linear from quadratic. (#3938)
+
 - **A parent agent can read its own sub-agent's result file again on a host
   whose home is a symlink.** The result path handed back in a completion event
   was built through `Path.resolve()`, which is correct for the traversal check
