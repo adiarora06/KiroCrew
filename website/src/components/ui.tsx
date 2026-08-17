@@ -18,6 +18,27 @@ export function CardTitle({ children, className, ...rest }: Omit<React.Component
   return <h3 className={twMerge("text-sm font-semibold tracking-tight text-text-strong mb-3.5 flex items-center gap-2", className)} {...rest}>{children}</h3>
 }
 
+/**
+ * `danger` colours the LABEL unconditionally, not on `:hover`.
+ *
+ * A touch viewport never produces `hover`, so the previous
+ * `text-text hover:text-danger` rendered a destructive button identically to
+ * the non-destructive buttons beside it on a phone — the same class of defect
+ * as a hover-revealed control: the affordance existed only under a pointer
+ * (#3937). Found on the Channels page at 390px, where `Close` (which dismisses
+ * every agent in the channel) sat in a wrapped header row beside the frequent
+ * `3 agents` and `Clear Context` buttons at identical visual weight.
+ *
+ * Hover still does something on a pointer device — it brings up the border and
+ * a subtle fill — so the desktop affordance is not lost, only made
+ * unnecessary for recognising the control.
+ *
+ * This satisfies the enabled≠disabled invariant `ui.test.tsx` pins: that
+ * assertion exists because an idle label in `text-muted` reads as greyed out,
+ * and `text-danger` is emphatically not that. The assertion was written against
+ * the `text-text` token because that was the only foreground a Btn then had;
+ * it now checks the invariant it states.
+ */
 export const Btn = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement> & { danger?: boolean; primary?: boolean }>(
   ({ children, danger, primary, className, ...rest }, ref) => (
     <button
@@ -26,7 +47,7 @@ export const Btn = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttribute
         primary
           ? 'bg-accent text-accent-fg border-accent hover:bg-accent-hover hover:shadow-[0_0_12px_var(--accent-glow)]'
           : danger
-            ? 'border-border bg-transparent text-text hover:text-danger hover:border-danger'
+            ? 'border-border bg-transparent text-danger hover:border-danger hover:bg-danger-subtle'
             : 'border-border bg-transparent text-text hover:border-border-strong hover:bg-bg-hover'
       }`, className)}
       {...rest}

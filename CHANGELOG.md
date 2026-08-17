@@ -4,6 +4,18 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Destructive buttons look destructive on a phone.** `Btn`'s `danger`
+  variant coloured its label only on `:hover`, and a touch viewport never
+  produces `hover` — so a destructive button rendered identically to the
+  non-destructive buttons beside it. Same class of defect as a hover-revealed
+  control: the affordance existed only under a pointer. Found on the Channels
+  page at 390px, where `Close` (which dismisses every agent in the channel) sat
+  in a wrapped header row beside the frequent `3 agents` and `Clear Context`
+  buttons at identical visual weight. The label is now `text-danger`
+  unconditionally; hover still raises the border and adds a subtle fill, so the
+  pointer affordance is not lost, only made unnecessary for recognising the
+  control. (#3937)
+
 - **A parent agent can read its own sub-agent's result file again on a host
   whose home is a symlink.** The result path handed back in a completion event
   was built through `Path.resolve()`, which is correct for the traversal check
