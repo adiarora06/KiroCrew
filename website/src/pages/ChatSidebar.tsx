@@ -2630,47 +2630,177 @@ function ChatSidebar({
     // never drift apart — a glyph is the gutter's only content, so a missing
     // label would leave a coloured shape with no accessible name.
     //
-    // The order below is the subtitle chain's own precedence, so glyph and
-    // secondary line can never disagree about which state the row is in. An owed
-    // decision (approval, question) outranks every "working" signal, because a
-    // decision rendered as work in progress is how an owed approval goes
-    // unnoticed.
+    // ── One ordered state resolver (#3830) ────────────────────────────────
     //
+    // The gutter glyph and the subtitle line encode the SAME precedence. They
+    // used to be two independent ternary chains a few hundred lines apart,
+    // with comments asserting they "can never disagree" and nothing enforcing
+    // it: editing a branch in one silently desynchronised the glyph from the
+    // subtitle. They are now derived from this single list, so the ordering
+    // exists once and a new state is added in one place.
+    //
+    // Order is the contract. Owed decisions outrank every "working" signal —
+    // a blocking card keeps `s.running` true, so without that ranking the row
+    // would read "Thinking…" while nothing can advance until the user acts.
+    //
+    // `when` is a plain boolean, evaluated in order; the first truthy entry
+    // wins. Everything else is behind `build()` and is called ONLY for that
+    // winner. That laziness is load-bearing, not a style choice: the chain runs
+    // for every row, and `slotStatusDetail` is only meaningful for a running
+    // one — eagerly resolving the running label threw on rows where it is
+    // absent. The ternary chain this replaces got the same property for free by
+    // being a ternary; here it has to be explicit.
+    //
+    // The tails differ between the two consumers and stay with them: the gutter
+    // falls through to `unread`, the subtitle to `last_message`.
+    const rowState = ([
+      {
+        // Pending approval outranks running (mirrors the Board's inferLane,
+        // which returns its approval lane before the running check), so an owed
+        // approval is never hidden behind a "Thinking…" spinner.
+        key: 'pending_approval',
+        when: !!s.pending_approval,
+        build: () => ({
+          glyph: <ShieldCheck size={ROW_ICON_PX} style={{ color: 'var(--warn)' }} />,
+          label: i18nT('pages.chatSidebar.needs_approval'),
+          subtitle: (
+            <div className={ROW_STATUS_LINE_CLS}>
+              <span className="truncate"><span className="font-medium" style={{ color: 'var(--warn)' }}>{i18nT('pages.chatSidebar.needs_approval')}</span>{s.last_message ? <span className="text-muted"> · {s.last_message}</span> : null}</span>
+            </div>
+          ),
+        }),
+      },
+      {
+        // Sub-agents blocked on a spawn approval. Directly below the slot's own
+        // pending approval and above every "working" signal, for the same
+        // reason: an owed decision must not read as work in progress. The bot
+        // glyph is static, not pulsing — nothing is running — and warn-coloured
+        // to match the row above.
+        key: 'subagent_awaiting',
+        when: subagentAwaiting > 0,
+        build: () => ({
+          glyph: <Bot size={ROW_ICON_PX} style={{ color: 'var(--warn)' }} />,
+          label: subagentApprovalLabel,
+          subtitle: (
+            <div className={ROW_STATUS_LINE_CLS} title={subagentApprovalLabel}>
+              <span className="truncate font-medium" style={{ color: 'var(--warn)' }}>{subagentApprovalLabel}</span>
+            </div>
+          ),
+        }),
+      },
+      {
+        // An unanswered question card. Above every "working" signal for the
+        // same reason as the approval branches — and a blocking card keeps
+        // `s.running` true, so without this the row would show "Thinking…"
+        // while nothing can advance. Info-coloured and static-glyphed to stay
+        // distinct from the warn-coloured approval rows above.
+        //
+        // A card is a websocket broadcast with no transcript row, so
+        // `last_message` is whatever the agent last said BEFORE the ask — not
+        // the question. Trailing it after "Needs your answer ·" would read as
+        // the question itself, so the label stands alone.
+        key: 'needs_input',
+        when: !!s.needs_input,
+        build: () => ({
+          glyph: <MessageCircleQuestionMark size={ROW_ICON_PX} style={{ color: 'var(--info)' }} />,
+          label: needsInputLabel,
+          subtitle: (
+            <div className={ROW_STATUS_LINE_CLS} title={needsInputLabel}>
+              <span className="truncate font-medium" style={{ color: 'var(--info)' }}>{needsInputLabel}</span>
+            </div>
+          ),
+        }),
+      },
+      {
+        // An active goal loop outranks every "working" signal below it but
+        // stays under both approval branches: an owed decision must never read
+        // as unattended progress. Nothing is lost by ranking it high —
+        // `goalLoopDetail` carries whatever the lower branch would have shown,
+        // so this reads "Loop 7/24 · 3 agents running". Stalled (see
+        // `goalLoopStalled`): warn + "interrupted" rather than accent.
+        key: 'goal_loop',
+        when: !!goalLoop,
+        build: () => ({
+          glyph: <Goal size={ROW_ICON_PX} className={goalLoopStalled ? 'text-warn' : 'text-accent animate-pulse'} />,
+          label: goalLoopStalled ? `${goalLoopLabel} — ${i18nT('pages.chatSidebar.loop_interrupted')}` : goalLoopLabel,
+          subtitle: (
+            <div className={ROW_STATUS_LINE_CLS} title={goalLoopStalled ? i18nT('pages.chatSidebar.goal_loop_interrupted_title') : goalLoop && goalLoop.max_cycles > 0 ? i18nT('pages.chatSidebar.goal_loop_cycle', { count: goalLoop.cycle_count, total: goalLoop.max_cycles }) : i18nT('pages.chatSidebar.goal_loop_cycle_no_cap', { count: goalLoop?.cycle_count ?? 0 })}>
+              <span className="truncate"><span className={`font-medium ${goalLoopStalled ? 'text-warn' : 'text-accent'}`}>{goalLoopLabel}{goalLoopStalled ? ` — ${i18nT('pages.chatSidebar.loop_interrupted')}` : ''}</span>{goalLoopDetail ? <span className="text-muted"> · {goalLoopDetail}</span> : null}</span>
+            </div>
+          ),
+        }),
+      },
+      {
+        // A dynamic-workflow run launched from this session is still executing
+        // — surface it even though the parent turn has ended (`s.running` is
+        // false while the run executes in the background). Outranks the
+        // subagent count: workflow track agents may also register as
+        // subagents, and "which workflow / phase" is the stronger signal.
+        key: 'workflow',
+        when: !!wfActive,
+        build: () => ({
+          glyph: <Workflow size={ROW_ICON_PX} className="text-accent animate-pulse" />,
+          label: wfActive?.label ?? '',
+          subtitle: (
+            <div className={ROW_STATUS_LINE_ACCENT_CLS} title={`${wfActive?.count ?? 0} workflow${(wfActive?.count ?? 0) > 1 ? 's' : ''} running`}>
+              <span className="truncate">{wfActive?.label}</span>
+            </div>
+          ),
+        }),
+      },
+      {
+        // A spawned subagent is still running (or queued behind the concurrency
+        // cap) — surface it even if the parent turn has ended (`s.running` is
+        // false while it waits for completion events), so the sidebar shows
+        // live activity instead of a stale last message.
+        key: 'subagents',
+        when: subagentCount > 0,
+        build: () => ({
+          glyph: <Bot size={ROW_ICON_PX} className="text-accent animate-pulse" />,
+          label: subagentLabel,
+          subtitle: (
+            <div className={ROW_STATUS_LINE_ACCENT_CLS} title={subagentLabel}>
+              <span className="truncate">{subagentLabel}</span>
+            </div>
+          ),
+        }),
+      },
+      {
+        // A spinner, not a pulsing dot: "actively working" is the one state
+        // with a definite direction, and rotation reads as progress where a
+        // fading dot reads as a mere marker.
+        key: 'running',
+        when: !!s.running,
+        build: () => {
+          const text = slotStatusText(slotStatusDetail[s.key], simplifiedToolNames, uiLang)
+          return {
+            glyph: <Loader size={ROW_ICON_PX} className="text-accent animate-spin" />,
+            label: text,
+            subtitle: (
+              <div className={ROW_STATUS_LINE_ACCENT_CLS}>{text}</div>
+            ),
+          }
+        },
+      },
+    ] as const).find(entry => entry.when)?.build() ?? null
+
     // `unread` sits LAST, so it lights only when nothing else claims the slot.
     // That is stricter than the dot it replaces, which coexisted with the
     // workflow and sub-agent states; with one slot, showing two markers for one
-    // row is not available and the more specific state is the useful one.
+    // row is not available and the more specific state is the useful one. It is
+    // a gutter-only tail — the subtitle's own tail is `last_message`.
     //
     // The label is NOT passed to the lucide icons as `title`: that lands as an
     // svg attribute, which is not a tooltip. It goes on the gutter element.
-    const status: { glyph: React.ReactNode; label: string } | null = s.pending_approval
-      ? { glyph: <ShieldCheck size={ROW_ICON_PX} style={{ color: 'var(--warn)' }} />, label: i18nT('pages.chatSidebar.needs_approval') }
-      : subagentAwaiting > 0
-        ? { glyph: <Bot size={ROW_ICON_PX} style={{ color: 'var(--warn)' }} />, label: subagentApprovalLabel }
-        : s.needs_input
-          ? { glyph: <MessageCircleQuestionMark size={ROW_ICON_PX} style={{ color: 'var(--info)' }} />, label: needsInputLabel }
-          : goalLoop
-            ? { glyph: <Goal size={ROW_ICON_PX} className={goalLoopStalled ? 'text-warn' : 'text-accent animate-pulse'} />, label: goalLoopStalled ? `${goalLoopLabel} — ${i18nT('pages.chatSidebar.loop_interrupted')}` : goalLoopLabel }
-            : wfActive
-              ? { glyph: <Workflow size={ROW_ICON_PX} className="text-accent animate-pulse" />, label: wfActive.label }
-              : subagentCount > 0
-                ? { glyph: <Bot size={ROW_ICON_PX} className="text-accent animate-pulse" />, label: subagentLabel }
-                : s.running
-                  // A spinner, not a pulsing dot: "actively working" is the one
-                  // state with a definite direction, and rotation reads as
-                  // progress where a fading dot reads as a mere marker.
-                  //
-                  // The label is resolved HERE rather than hoisted above: the
-                  // status chain is evaluated for every row, and slotStatusDetail
-                  // is only meaningful for a running one.
-                  ? { glyph: <Loader size={ROW_ICON_PX} className="text-accent animate-spin" />, label: slotStatusText(slotStatusDetail[s.key], simplifiedToolNames, uiLang) }
-                  : s.unread
-                    // A DOT, so it keeps its own size: `ROW_ICON_PX` sizes the
-                    // lucide glyphs, whose ink covers a fraction of their box,
-                    // while a filled disc covers all of it. At 10px it reads as
-                    // heavier than every state that outranks it.
-                    ? { glyph: <span className="w-2 h-2 rounded-full" style={{ background: 'var(--accent)' }} />, label: i18nT('pages.chatSidebar.agent_finished_your_turn') }
-                    : null
+    const status: { glyph: React.ReactNode; label: string } | null = rowState
+      ? { glyph: rowState.glyph, label: rowState.label }
+      : s.unread
+        // A DOT, so it keeps its own size: `ROW_ICON_PX` sizes the lucide
+        // glyphs, whose ink covers a fraction of their box, while a filled
+        // disc covers all of it. At 10px it reads as heavier than every
+        // state that outranks it.
+        ? { glyph: <span className="w-2 h-2 rounded-full" style={{ background: 'var(--accent)' }} />, label: i18nT('pages.chatSidebar.agent_finished_your_turn') }
+        : null
     const rowColor = ci != null ? paletteColors[ci] : null
     const boostStyle: Record<string, string> = {}
     if (rowColor && ci != null) {
@@ -2940,78 +3070,11 @@ function ChatSidebar({
                 <textarea ref={renameInputRef} rows={1} className={`w-full bg-transparent border border-accent rounded px-1 py-0 ${ROW_TITLE_CLS} text-text-strong outline-none select-text resize-none block overflow-hidden`} value={renameValue} onChange={e => setRenameValue(e.target.value.replace(/[\r\n]+/g, ' '))} {...ime.bindEnter<HTMLTextAreaElement>({ onEnter: () => { (document.activeElement as HTMLTextAreaElement)?.blur() }, onEscape: () => { cancelRenameRef.current = true; setRenamingSlot(null) }, onBlur: () => { if (!cancelRenameRef.current && renameValue.trim()) { dispatch(sseSlotTitle({ key: s.key, title: renameValue.trim() })); api.renameSlot(s.key, renameValue.trim()).catch(() => { queryClient.invalidateQueries({ queryKey: ['chat-slots'] }) }) } cancelRenameRef.current = false; setRenamingSlot(null) } })} onMouseDown={e => e.stopPropagation()} />
               ) : (s.title && s.title !== s.key ? s.title : s.key)}
             </div>
-            {s.pending_approval ? (
-              // Pending approval outranks running (mirrors the Board's
-              // inferLane, which returns its approval lane before the running
-              // check): show the yellow dot + "Needs approval" even if the slot
-              // still reports running, so an owed approval is never hidden
-              // behind a "Thinking…" spinner.
-              <div className={ROW_STATUS_LINE_CLS}>
-                <span className="truncate"><span className="font-medium" style={{ color: 'var(--warn)' }}>{i18nT('pages.chatSidebar.needs_approval')}</span>{s.last_message ? <span className="text-muted"> · {s.last_message}</span> : null}</span>
-              </div>
-            ) : subagentAwaiting > 0 ? (
-              // Sub-agents blocked on a spawn approval. Ranked directly below
-              // the slot's own pending approval and above every "working"
-              // signal for the same reason: an owed decision must not read as
-              // work in progress. The bot glyph is static, not pulsing —
-              // nothing is running — and warn-coloured to match the row above.
-              <div className={ROW_STATUS_LINE_CLS} title={subagentApprovalLabel}>
-                <span className="truncate font-medium" style={{ color: 'var(--warn)' }}>{subagentApprovalLabel}</span>
-              </div>
-            ) : s.needs_input ? (
-              // An unanswered question card. Ranked above every "working" signal
-              // for the same reason the approval branches are: an owed reply must
-              // not read as work in progress — and a blocking card keeps
-              // `s.running` true, so without this the row would show "Thinking…"
-              // while nothing can advance until the user answers. Info-coloured
-              // and static-glyphed to stay distinct from the warn-coloured
-              // approval rows above.
-              //
-              // A card is a websocket broadcast with no transcript row, so
-              // `last_message` is whatever the agent last said BEFORE the ask —
-              // not the question. Trailing it after "Needs your answer ·" reads
-              // as the question itself, so the label stands alone and the
-              // transcript carries the card.
-              <div className={ROW_STATUS_LINE_CLS} title={needsInputLabel}>
-                <span className="truncate font-medium" style={{ color: 'var(--info)' }}>{needsInputLabel}</span>
-              </div>
-            ) : goalLoop ? (
-              // An active goal loop outranks every "working" signal below it but
-              // stays under both approval branches: an owed decision must never
-              // read as unattended progress. Nothing is lost by ranking it high
-              // — `goalLoopDetail` carries whatever the lower branch would have
-              // shown, so this line reads "Loop 7/24 · 3 agents running".
-              // Stalled (see `goalLoopStalled`): the label goes warn + "interrupted"
-              // rather than accent. No inline dot — the loop's state marker lives
-              // in the status gutter (a static warn Goal icon when stalled, a
-              // pulsing accent one when live).
-              <div className={ROW_STATUS_LINE_CLS} title={goalLoopStalled ? i18nT('pages.chatSidebar.goal_loop_interrupted_title') : goalLoop.max_cycles > 0 ? i18nT('pages.chatSidebar.goal_loop_cycle', { count: goalLoop.cycle_count, total: goalLoop.max_cycles }) : i18nT('pages.chatSidebar.goal_loop_cycle_no_cap', { count: goalLoop.cycle_count })}>
-                <span className="truncate"><span className={`font-medium ${goalLoopStalled ? 'text-warn' : 'text-accent'}`}>{goalLoopLabel}{goalLoopStalled ? ` — ${i18nT('pages.chatSidebar.loop_interrupted')}` : ''}</span>{goalLoopDetail ? <span className="text-muted"> · {goalLoopDetail}</span> : null}</span>
-
-              </div>
-            ) : wfActive ? (
-              // A dynamic-workflow run launched from this session is still
-              // executing — surface it even though the parent turn has ended
-              // (s.running is false while the run executes in the background),
-              // so the sidebar shows the live run instead of a stale last
-              // message. Outranks the subagent count: workflow track agents
-              // may also register as subagents, and "which workflow / phase"
-              // is the stronger signal.
-              <div className={ROW_STATUS_LINE_ACCENT_CLS} title={`${wfActive.count} workflow${wfActive.count > 1 ? 's' : ''} running`}>
-                <span className="truncate">{wfActive.label}</span>
-              </div>
-            ) : subagentCount > 0 ? (
-              // A spawned subagent is still running (or queued behind the
-              // concurrency cap) — surface it even if the parent turn has ended
-              // (s.running === false while it waits for completion events), so
-              // the sidebar shows live activity instead of a stale last
-              // message. Outranks the generic "Thinking…".
-              <div className={ROW_STATUS_LINE_ACCENT_CLS} title={subagentLabel}>
-                <span className="truncate">{subagentLabel}</span>
-              </div>
-            ) : s.running ? (
-              <div className={ROW_STATUS_LINE_ACCENT_CLS}>{slotStatusText(slotStatusDetail[s.key], simplifiedToolNames, uiLang)}</div>
-            ) : s.last_message ? (
+            {/* Subtitle: the same ordered resolver the gutter glyph uses, so
+                the two can no longer disagree (#3830). The tail is this
+                consumer's own — `last_message`, where the gutter's is
+                `unread`. */}
+            {rowState ? rowState.subtitle : s.last_message ? (
               <div className={ROW_STATUS_LINE_MUTED_CLS}>{s.last_message}</div>
             ) : null}
             {s.source_links && s.source_links.length > 0 && (() => {
