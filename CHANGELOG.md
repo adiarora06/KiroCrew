@@ -4,6 +4,21 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Subagent rows in System > Sessions no longer claim to carry no processes
+  and no MCP stubs.** Every task row rendered an em dash in the Procs and MCP
+  stubs columns while its parent session row reported real numbers — the
+  natural reading being that subagents do not participate in the MCP pool at
+  all. That is wrong, and wrong about the thing the page exists to answer: a
+  subagent session spawns its own poolable stub set and reaches the shared
+  backends through the same gateway daemon a top-level session does (measured:
+  18 `--poolable` stubs under one shared subagent runtime, 3 sessions × 6
+  servers, every one pooled). Nothing counted them — `task_memory_rows()`
+  emitted no such fields, the reaper's cost sweep took no such reading, and the
+  frontend hard-coded both to null. The sweep now counts each run's subtree and
+  attributes it the way RSS and CPU already are, split across the co-tenants of
+  a shared runtime. "Not measured yet" stays null (still an em dash, honestly)
+  rather than becoming a 0 that would restate the same false claim. (#3953)
+
 - **A parent agent can read its own sub-agent's result file again on a host
   whose home is a symlink.** The result path handed back in a completion event
   was built through `Path.resolve()`, which is correct for the traversal check

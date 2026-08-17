@@ -868,6 +868,40 @@ def _proc_cpu_jiffies(pid: int) -> int:
         return 0
 
 
+def _apply_subtree_counts(info: "SubagentInfo", pid: int, shared_n: int) -> None:
+    """Record ``pid``'s subtree process / MCP-stub counts onto ``info``.
+
+    Attributed exactly the way RSS and CPU are in the same sweep: a shared
+    runtime's measurement divided by the number of concurrently-live sharing
+    sessions on that pid, so co-tenants of one runtime each report their share
+    rather than all claiming the whole tree.
+
+    A measured-but-nonzero count never rounds down to 0. Reporting "0 MCP
+    stubs" for a session that demonstrably has some is the misreading this
+    whole change exists to remove, and it would be worse than the em dash it
+    replaced — an em dash at least reads as "unknown". Unmeasurable stays
+    ``None``, which the surface still renders as an em dash, honestly.
+    """
+    # Local import: this module keeps ``acp.runtime`` behind TYPE_CHECKING, and
+    # the same deferred-import pattern is used elsewhere here for exactly that
+    # reason. Called once per live agent per reaper sweep, so the lookup cost is
+    # irrelevant next to the /proc walk it guards.
+    from kiro_crew.acp.runtime import count_subtree_procs_and_stubs
+
+    counts = count_subtree_procs_and_stubs(pid)
+    if counts is None or shared_n <= 0:
+        return
+    procs, stubs = counts
+
+    def _share(total: int) -> int:
+        if total <= 0:
+            return 0
+        return max(1, round(total / shared_n))
+
+    info.last_procs = _share(procs)
+    info.last_mcp_stubs = _share(stubs)
+
+
 def _subtree_cpu_jiffies(pid: int) -> int:
     """Sum utime+stime across ``pid`` and its descendants (clock ticks).
 
@@ -1083,6 +1117,16 @@ class SubagentInfo:
     # sample costs no extra syscalls.
     last_rss_gb: float = 0.0
     last_cpu_cores: float = 0.0
+    # Subtree process / MCP-stub counts from the same sweep. ``None`` means NOT
+    # MEASURED (no sweep yet, or a platform with no ``/proc``) and must stay
+    # distinct from 0: the System > Sessions task rows rendered a hard-coded
+    # null as an em dash, which read as "this subagent carries no MCP stubs" —
+    # a claim, and a wrong one. A shared subagent runtime does spawn its own
+    # poolable stub set (measured: 18 under one runtime, 3 sessions x 6
+    # servers) and reaches the shared backends through the same gateway daemon
+    # a top-level session does (#3953).
+    last_procs: Optional[int] = None
+    last_mcp_stubs: Optional[int] = None
     _cpu_jiffies_prev: int = 0  # last subtree utime+stime sample (clock ticks)
     _cpu_sample_ts: float = 0.0  # monotonic time of the last CPU sample
     # Session sharing — when True, this subagent runs as a session on the
@@ -1703,6 +1747,7 @@ class SubagentManager:
                             info.peak_cpu_cores = cores
                 info._cpu_jiffies_prev = jiffies
                 info._cpu_sample_ts = now
+                _apply_subtree_counts(info, pid_owner, shared_n)
                 continue
             pid = info._pid
             rss_kb = _proc_rss_kb(pid)
@@ -1721,6 +1766,7 @@ class SubagentManager:
                         info.peak_cpu_cores = cores
             info._cpu_jiffies_prev = jiffies
             info._cpu_sample_ts = now
+            _apply_subtree_counts(info, pid, 1)
 
     def _record_cost(self, info: SubagentInfo) -> None:
         """Persist this run's high-water RSS/CPU to the learned-cost store."""
@@ -2579,7 +2625,14 @@ class SubagentManager:
 
         ``shared`` mirrors ``_session_sharing``: the value is that runtime's
         measurement divided by the number of concurrently-live sharing sessions
-        on the same pid, i.e. an average share, not an exclusive figure.
+        on the same pid, i.e. an average share, not an exclusive figure. The
+        same split applies to ``procs``/``mcp``.
+
+        ``procs`` and ``mcp`` are the subtree's process and MCP-stub counts.
+        They were previously not emitted at all, so the System > Sessions task
+        rows hard-coded both to null and rendered an em dash — which reads as
+        "a subagent carries no MCP stubs", a claim rather than a gap, and wrong
+        about the very thing that page exists to answer (#3953).
         """
         return [
             {
@@ -2593,6 +2646,12 @@ class SubagentManager:
                 "started_at": a.started,
                 "shared": a._session_sharing,
                 "pid": a._pid,
+                # None until the first sweep observes this agent (or on a
+                # platform with no /proc). Deliberately NOT coerced to 0: the
+                # surface renders null as an em dash, and "0 MCP stubs" would be
+                # a false claim where the em dash is an honest "not measured".
+                "procs": a.last_procs,
+                "mcp": a.last_mcp_stubs,
                 "sampled": a.last_rss_gb > 0.0 or a.peak_rss_gb > 0.0,
             }
             for a in self._agents.values()

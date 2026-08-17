@@ -58,12 +58,17 @@ def _row(key: str, pid: int | None) -> dict[str, object]:
 @pytest.fixture(autouse=True)
 def stub_proc(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the handler off real /proc — the sampler is unit-tested separately."""
+    from kiro_crew.acp import runtime as rt
     from kiro_crew.dashboard import session_memory as sm
 
     monkeypatch.setattr(sm.sys, "platform", "linux")
     monkeypatch.setattr(sm, "_get_rss_tree_mb", lambda pid: 1525.0)
     monkeypatch.setattr(sm, "_iter_descendant_pids", lambda pid: [pid, pid + 1])
-    monkeypatch.setattr(sm, "_read_cmdline", lambda pid: "")
+    # The subtree walk + stub marker moved to acp.runtime so the session rows
+    # and the subagent rows of this table share one definition (#3953); patch it
+    # at its new home. Same shape as before: 2 procs, no stubs.
+    monkeypatch.setattr(rt, "_iter_descendant_pids", lambda pid: [pid, pid + 1])
+    monkeypatch.setattr(rt, "read_cmdline", lambda pid: "")
     monkeypatch.setattr(sm, "_subtree_cpu_jiffies", lambda pid: 0)
     monkeypatch.setattr(sm, "_get_static_system_info", lambda: {"mem_total_gb": 48.0})
 

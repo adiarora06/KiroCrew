@@ -45,6 +45,8 @@ const task = (over: Partial<TaskPayloadRow> = {}): TaskPayloadRow => ({
   rss_mb: 50,
   peak_rss_mb: 60,
   cpu_cores: 0.05,
+  procs: 4,
+  mcp: 6,
   started_at: Date.now() / 1000 - 30,
   shared: false,
   pid: 8,
@@ -421,5 +423,39 @@ describe('buildTree credits and turns', () => {
     const rows = buildTree([session()], [task()])
     expect(rows[0].subRows![0].credits).toBeNull()
     expect(rows[0].subRows![0].turns).toBeNull()
+  })
+})
+
+// ── Task rows carry their own procs / MCP-stub counts (#3953) ──
+
+describe('task row procs and MCP stubs', () => {
+  it('reports the counts the backend measured instead of a hard-coded null', () => {
+    // Both were hard-coded null here, and the cell renderer turns null into an
+    // em dash -- which reads as "this subagent carries no processes and no MCP
+    // stubs". A subagent session spawns its own poolable stub set and reaches
+    // the shared backends through the same gateway daemon a top-level session
+    // does, so the em dash was a claim rather than a gap.
+    const rows = buildTree([session()], [task()])
+    const t = rows[0].subRows![0]
+    expect(t.kind).toBe('task')
+    expect(t.procs).toBe(4)
+    expect(t.mcp).toBe(6)
+  })
+
+  it('keeps null when the backend has not measured yet', () => {
+    // "Not measured" is what an em dash should mean, and it must stay
+    // reachable -- a fresh task has had no reaper sweep, and a non-Linux host
+    // cannot walk /proc at all.
+    const rows = buildTree([session()], [task({ procs: null, mcp: null })])
+    const t = rows[0].subRows![0]
+    expect(t.procs).toBeNull()
+    expect(t.mcp).toBeNull()
+  })
+
+  it('does not turn a genuine zero into a null', () => {
+    const rows = buildTree([session()], [task({ procs: 1, mcp: 0 })])
+    const t = rows[0].subRows![0]
+    expect(t.procs).toBe(1)
+    expect(t.mcp).toBe(0)
   })
 })

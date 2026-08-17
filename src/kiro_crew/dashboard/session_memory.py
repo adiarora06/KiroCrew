@@ -32,7 +32,11 @@ import time
 from collections import deque
 from typing import TYPE_CHECKING, Callable, Optional
 
-from kiro_crew.acp.runtime import _get_rss_tree_mb, _iter_descendant_pids
+from kiro_crew.acp.runtime import (
+    _get_rss_tree_mb,
+    _iter_descendant_pids,
+    count_subtree_procs_and_stubs,
+)
 from kiro_crew.dashboard.handlers_system import _get_static_system_info
 from kiro_crew.dashboard.state import NEW_SESSION_TITLE
 from kiro_crew.executors import subprocess_executor
@@ -52,20 +56,6 @@ logger = logging.getLogger(__name__)
 # a memory-usage graph is not worth a disk write per poll, and it re-fills within
 # one window after a restart.
 _HISTORY_LEN = 60
-
-# Marker identifying an MCP stub process inside a session's tree. Stubs are the
-# per-server shims a session spawns, so their count is the useful "how many MCP
-# servers is this session carrying" signal.
-_STUB_MARKER = "mcp_gateway.stub"
-
-
-def _read_cmdline(pid: int) -> str:
-    """Return ``/proc/<pid>/cmdline`` as a string, or "" when unreadable."""
-    try:
-        with open(f"/proc/{pid}/cmdline", encoding="utf-8", errors="replace") as fh:
-            return fh.read().replace("\0", " ")
-    except OSError:
-        return ""
 
 
 def _spend_for_session(
@@ -190,12 +180,12 @@ class SessionMemorySampler:
         """Blocking per-pid sample. MUST run off the event loop — a session tree
         can be dozens of processes, i.e. dozens of ``/proc`` reads."""
         rss_mb = _get_rss_tree_mb(pid)
-        procs: Optional[int] = None
-        stubs: Optional[int] = None
-        if sys.platform == "linux":
-            tree = _iter_descendant_pids(pid)
-            procs = len(tree)
-            stubs = sum(1 for p in tree if _STUB_MARKER in _read_cmdline(p))
+        # One shared definition of "process in this tree" / "MCP stub", also used
+        # by the subagent sampler, so the parent and task rows of this very table
+        # cannot disagree about what they are counting (#3953).
+        counts = count_subtree_procs_and_stubs(pid)
+        procs: Optional[int] = counts[0] if counts else None
+        stubs: Optional[int] = counts[1] if counts else None
         return {
             "rss_mb": round(rss_mb, 1) if rss_mb is not None else None,
             "procs": procs,

@@ -379,6 +379,40 @@ def _iter_descendant_pids(pid: int) -> list[int]:
     return order
 
 
+# Marker identifying an MCP stub process inside a runtime's tree. Stubs are the
+# per-server shims a session spawns, so their count is the useful "how many MCP
+# servers is this runtime carrying" signal.
+STUB_MARKER = "mcp_gateway.stub"
+
+
+def read_cmdline(pid: int) -> str:
+    """Return ``/proc/<pid>/cmdline`` as a string, or "" when unreadable."""
+    try:
+        with open(f"/proc/{pid}/cmdline", encoding="utf-8", errors="replace") as fh:
+            return fh.read().replace("\0", " ")
+    except OSError:
+        return ""
+
+
+def count_subtree_procs_and_stubs(pid: int) -> tuple[int, int] | None:
+    """``(process_count, mcp_stub_count)`` for ``pid``'s subtree, or ``None``.
+
+    ``None`` means "not measurable here", which is NOT the same as zero: the
+    walk reads ``/proc``, so it answers only on Linux. Callers must keep that
+    distinction — rendering an unmeasured count as ``0`` states that a session
+    carries no MCP servers, which is a claim rather than a gap.
+
+    Lives here, beside :func:`_iter_descendant_pids`, so the session-memory
+    surface and the subagent sampler share ONE definition of what an MCP stub
+    is. Two copies of that marker would let the parent-session and subagent
+    rows of the same table disagree about what they are counting.
+    """
+    if sys.platform != "linux":
+        return None
+    tree = _iter_descendant_pids(pid)
+    return len(tree), sum(1 for p in tree if STUB_MARKER in read_cmdline(p))
+
+
 #: A whole-machine process table: ``(children_by_ppid, rss_kib_by_pid)``.
 _ProcessTable = tuple[dict[int, list[int]], dict[int, int]]
 

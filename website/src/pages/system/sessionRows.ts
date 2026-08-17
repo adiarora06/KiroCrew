@@ -164,8 +164,14 @@ function taskRow(t: TaskPayloadRow): SessionRow {
     rssMb: t.sampled ? t.rss_mb : null,
     peakMb: t.sampled ? t.peak_rss_mb : null,
     cpuCores: t.sampled ? t.cpu_cores : null,
-    procs: null,
-    mcp: null,
+    // Previously hard-coded null, which the cell renderer turns into an em
+    // dash -- reading as "this subagent carries no processes and no MCP
+    // stubs". It does carry them: a subagent session spawns its own poolable
+    // stub set and reaches the shared backends through the same gateway daemon
+    // a top-level session does (#3953). Still null when the backend has not
+    // measured yet, which is what an em dash should mean.
+    procs: t.procs ?? null,
+    mcp: t.mcp ?? null,
     credits: null,
     turns: null,
     uptimeS: t.started_at ? Date.now() / 1000 - t.started_at : null,

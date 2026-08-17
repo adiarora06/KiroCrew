@@ -984,6 +984,115 @@ class TestLastSampleAndMemoryRows:
         (row,) = m.task_memory_rows()
         assert row["sampled"] is False
 
+    # ── Subtree process / MCP-stub counts (#3953) ──────────────────────────
+    #
+    # task_memory_rows emitted no procs/mcp fields at all, so sessionRows.taskRow
+    # hard-coded both to null and every subagent row rendered an em dash in the
+    # Procs and MCP-stubs columns. That reads as "a subagent carries no MCP
+    # stubs" -- a claim, and wrong about the thing the page exists to answer.
+
+    def _counts(self, monkeypatch, procs: int, stubs: int) -> None:
+        import kiro_crew.acp.runtime as rt
+
+        monkeypatch.setattr(
+            rt, "count_subtree_procs_and_stubs", lambda _pid: (procs, stubs)
+        )
+
+    def test_rows_report_the_sampled_subtree_counts(self, monkeypatch) -> None:
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent(id="a1")
+        m._agents = {"a1": info}
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 1024 * 1024)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        self._counts(monkeypatch, procs=9, stubs=6)
+        m._sample_live_costs()
+
+        (row,) = m.task_memory_rows()
+        assert row["procs"] == 9
+        assert row["mcp"] == 6
+
+    def test_shared_co_tenants_each_report_their_share(self, monkeypatch) -> None:
+        """Attributed exactly like RSS and CPU: the runtime's counts divided by
+        the live sharing sessions on that pid. Measured on a live host: 18
+        stubs under one shared runtime, 3 sessions x 6 servers."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=3, max_concurrent=16, last_ts=0.0)
+        agents = {
+            f"a{i}": self._agent(id=f"a{i}", _session_sharing=True) for i in range(1, 4)
+        }
+        m._agents = agents
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 1024 * 1024)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        self._counts(monkeypatch, procs=21, stubs=18)
+        m._sample_live_costs()
+
+        for row in m.task_memory_rows():
+            assert row["procs"] == 7
+            assert row["mcp"] == 6
+
+    def test_a_measured_nonzero_count_never_rounds_down_to_zero(
+        self, monkeypatch
+    ) -> None:
+        """Reporting "0 MCP stubs" for a session that demonstrably has some is
+        WORSE than the em dash it replaced -- an em dash reads as unknown."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=4, max_concurrent=16, last_ts=0.0)
+        agents = {
+            f"a{i}": self._agent(id=f"a{i}", _session_sharing=True) for i in range(1, 5)
+        }
+        m._agents = agents
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 1024 * 1024)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        self._counts(monkeypatch, procs=4, stubs=1)  # 1/4 would round to 0
+        m._sample_live_costs()
+
+        for row in m.task_memory_rows():
+            assert row["mcp"] == 1
+
+    def test_a_genuinely_zero_count_stays_zero(self, monkeypatch) -> None:
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        m._agents = {"a1": self._agent(id="a1")}
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 1024 * 1024)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        self._counts(monkeypatch, procs=1, stubs=0)
+        m._sample_live_costs()
+
+        (row,) = m.task_memory_rows()
+        assert row["mcp"] == 0
+
+    def test_an_unmeasured_task_reports_null_not_zero(self) -> None:
+        """No sweep yet (or no /proc): null, which the surface renders as an em
+        dash -- honest, unlike a 0 that would assert "no MCP stubs"."""
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        m._agents = {"a1": self._agent(id="a1")}
+
+        (row,) = m.task_memory_rows()
+        assert row["procs"] is None
+        assert row["mcp"] is None
+
+    def test_an_unmeasurable_platform_leaves_the_counts_null(
+        self, monkeypatch
+    ) -> None:
+        import kiro_crew.acp.runtime as rt
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        m._agents = {"a1": self._agent(id="a1")}
+        monkeypatch.setattr(sub, "_proc_rss_kb", lambda pid: 1024 * 1024)
+        monkeypatch.setattr(sub, "_subtree_cpu_jiffies", lambda pid: 0)
+        monkeypatch.setattr(rt, "count_subtree_procs_and_stubs", lambda _pid: None)
+        m._sample_live_costs()
+
+        (row,) = m.task_memory_rows()
+        assert row["procs"] is None
+        assert row["mcp"] is None
+
     def test_done_and_queued_agents_are_excluded(self) -> None:
         m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
         m._agents = {
