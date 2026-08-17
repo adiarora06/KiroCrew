@@ -4,6 +4,17 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **Every builtin app now starts its content 8px from a phone screen edge, not 24px.**
+  The narrow-first page gutter (`px-2 md:px-6`) reached the core pages and Issue
+  Radar, while the remaining builtin apps kept an unconditional `px-6`, so their
+  content was inset 24px before any card inset stacked on top. Meetings, Code
+  Review Sage, Auto Research, Workflows, Mochi, Papyrus, PPTX Maker and Ops
+  Mission Control now carry the same gutter, converted a whole file at a time so
+  a header and the rows beneath it cannot render on two different left edges.
+  Centered empty states keep their `px-6`, where it is the element's only inset
+  and flushing it would push centered copy toward the edge for no width gain; a
+  guard test states that exclusion so a later pass does not read it as a miss.
+
 - **Destructive buttons look destructive on a phone.** `Btn`'s `danger`
   variant coloured its label only on `:hover`, and a touch viewport never
   produces `hover` — so a destructive button rendered identically to the

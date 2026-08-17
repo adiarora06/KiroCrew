@@ -94,6 +94,38 @@ describe('narrow-first layout baseline', () => {
     ).toEqual([])
   })
 
+  it('leaves only centered placeholders holding a bare px-6 in the builtin apps', async () => {
+    // The app sweep converted page gutters and deliberately did NOT convert
+    // centered empty states, where `px-6` is the element's ONLY inset: flushing
+    // it to 8px pushes centered copy toward the screen edge for no width gain,
+    // because the copy is already narrower than the pane. Stating that here is
+    // the point -- without it, the next pass reads those four lines as misses
+    // and "finishes" a sweep that was already complete.
+    //
+    // The rule is per-LINE rather than per-file, unlike the half-conversion
+    // check above, because these placeholders legitimately sit in files that
+    // carry no gutter at all. A pill's own padding (`rounded-full px-6`) is not
+    // a gutter either.
+    const offenders: string[] = []
+    for await (const file of walkSource(join(SRC, 'apps'))) {
+      const src = await readFile(file, 'utf8')
+      const stripped = src.replace(/(?<![\w:-])(?:md|sm|lg|xl):px-6/g, '')
+      for (const [i, line] of stripped.split('\n').entries()) {
+        if (!/(?<![\w:-])px-6/.test(line)) continue
+        const centered = /items-center/.test(line)
+          && /justify-center/.test(line)
+          && /text-center/.test(line)
+        if (!centered && !/rounded-full/.test(line)) {
+          offenders.push(`${file.replace(SRC, 'src')}:${i + 1}`)
+        }
+      }
+    }
+    expect(
+      offenders,
+      'a bare px-6 in a builtin app is a 24px phone gutter: write `px-2 md:px-6`',
+    ).toEqual([])
+  })
+
   it('keeps the page title in the SAME column as the content it labels', async () => {
     // The title belongs to the content column, not to the chrome above it: it shares
     // its left edge with the cards and rows beneath it, so those all read as one
