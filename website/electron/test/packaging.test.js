@@ -3,6 +3,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
+it("Linux BrowserWindows carry the packaged application icon", () => {
+  const main = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+  assert.match(main, /if \(IS_WIN \|\| IS_LINUX\) \{[\s\S]*?opts\.icon = path\.join\(__dirname, iconFile\)/);
+});
+
 const ROOT = path.resolve(__dirname, "..");
 
 describe("electron-builder files list", () => {

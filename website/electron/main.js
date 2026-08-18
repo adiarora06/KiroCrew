@@ -1881,10 +1881,11 @@ function createWindow() {
     // out of the resting chrome while Alt still reveals it.
     opts.autoHideMenuBar = true;
   }
-  // Window + taskbar icon (Windows only): running unpackaged (`electron .`)
-  // otherwise shows the default Electron icon. macOS takes its icon from the
-  // .app bundle and Linux from the .desktop/AppImage, so leave those untouched.
-  if (IS_WIN) {
+  // Window + taskbar icon: the explicit BrowserWindow icon is required on
+  // Linux too. Some GNOME/AppImage launches do not associate the generated
+  // desktop entry with the live window and otherwise fall back to Electron's
+  // generic X icon. macOS takes its icon from the .app bundle.
+  if (IS_WIN || IS_LINUX) {
     const iconFile = identityFamily(app.getVersion()) === "nightly"
       && fs.existsSync(path.join(__dirname, "icon-nightly.png"))
       ? "icon-nightly.png" : "icon.png";
