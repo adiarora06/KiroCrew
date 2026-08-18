@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAppDispatch } from '../store'
 import { switchSlot } from '../store/chatSlice'
 import { api } from '../api/client'
+import { sendChatReceipt } from '../utils/sendDelivery'
 import type { AgentSource } from './useAgentSync'
 import { useImeGuard } from './useImeGuard'
 import { KIRO_GHOST_PIXELS } from './sceneText'
@@ -346,15 +347,18 @@ export function useSceneInteraction(
         await api.steerChat(msg, slotKey)
       } else {
         // Idle or waiting for input: start/continue the turn. `?ws=1` answers
-        // with a JSON receipt ({ok, queued, error}) and the turn itself streams
-        // over WS. An HTTP 4xx/5xx RESOLVES rather than rejecting, so the
-        // receipt must be read: without this check every refused send fell
+        // with a JSON receipt (read via sendChatReceipt) and the turn itself
+        // streams over WS. An HTTP 4xx/5xx RESOLVES rather than rejecting, so
+        // the receipt must be read: without this check every refused send fell
         // through to 'sent' below — the state asserting the opposite of what
-        // happened, for precisely the errors that matter.
-        const r = await api.sendChat(msg, slotKey)
-        const body = await r.json().catch(() => ({}))
-        if (!body.ok && !body.queued) {
-          reportFailedSend(typeof body.error === 'string' ? body.error : undefined)
+        // happened, for precisely the errors that matter. Checked on
+        // `!accepted` rather than `refused`: an unreadable body (a proxy error
+        // page where `.json()` itself throws) is neither `ok` nor `queued`
+        // either, and must report the same way a readable refusal does.
+        const response = await api.sendChat(msg, slotKey)
+        const receipt = await sendChatReceipt(response)
+        if (!receipt.accepted) {
+          reportFailedSend(receipt.error)
           return
         }
       }

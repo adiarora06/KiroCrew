@@ -39,6 +39,7 @@ import { ZoomProvider } from './hooks/ZoomProvider'
 import { api, isAuthBannerShown } from './api/client'
 import type { KiroCreditUsage, KiroUsagePayload } from './api/client'
 import { safeSetItem } from './utils/safeStorage'
+import { sendChatReceipt } from './utils/sendDelivery'
 import { gcOrphanedStorage } from './utils/storageGc'
 import { isMetricNumber, metricNumber } from './utils/metrics'
 import { Rocket, Menu, Bell, Code, RefreshCw, Package, Loader2, Download, Hammer, XCircle, Check, AlertTriangle, CheckCircle, X, AudioWaveform, ChevronUp, MoreHorizontal, Coins, ArrowLeftToLine, LayoutGrid, Fullscreen, SquareTerminal, Bot, Search as SearchIcon } from 'lucide-react'
@@ -2116,11 +2117,13 @@ export default function App() {
       await api.chatSlotContext(slot, FEATURE_REQUEST_PROMPT_FALLBACK, { source: 'feature-request', maxAge: 60 })
     } catch { /* Send the visible request even if hidden context is unavailable. */ }
     try {
-      const r = await api.sendChat(visibleMessage, slot, colorTheme)
-      const body = await r.json().catch(() => ({}))
+      const receipt = await sendChatReceipt(await api.sendChat(visibleMessage, slot, colorTheme))
       // Resolution is not success: the server accepted neither `ok` nor
-      // `queued`, so no turn started and no WS response is coming.
-      if (!body.ok && !body.queued) reportFailedSend(typeof body.error === 'string' ? body.error : undefined)
+      // `queued`, so no turn started and no WS response is coming. Checked on
+      // `!accepted` rather than `refused` — an unreadable body (`.json()`
+      // itself throwing) is neither `ok` nor `queued` either, and must report
+      // the same way a readable refusal does.
+      if (!receipt.accepted) reportFailedSend(receipt.error)
     } catch { reportFailedSend() }
   }, [dispatch, navigate, colorTheme, appStore])
 

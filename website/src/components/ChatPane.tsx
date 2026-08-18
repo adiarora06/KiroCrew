@@ -24,7 +24,7 @@ import { useAvailableModels } from '../hooks/useAvailableModels'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAppSelector, useAppDispatch, store } from '../store'
 import { PANE_HYDRATE_LIMIT, retireStatelessQuestion, captureStatelessCard, capturePendingAskId, confirmOptimisticSend, selectSlotMessages, selectSlotStreamState, selectComposerBusy, hydrateSlotMessages, appendSlotMessage, requestStop, cancelQueuedMessage, setAgentSwitchNotice } from '../store/chatSlice'
-import { confirmedDelivered } from '../utils/sendDelivery'
+import { confirmedDelivered, sendChatReceipt } from '../utils/sendDelivery'
 import { triggerRefresh, updateSlot } from '../store/dashboardSlice'
 import { performSlotSwitch } from '../lib/slotSwitch'
 import { performAgentSlotSwitch } from '../lib/agentSwitch'
@@ -388,10 +388,10 @@ export default function ChatPane({
     api.sendChat(llm, slotKey, undefined, controller.signal, meta)
       .then(async (r) => {
         clearTimeout(timeout)
-        const body = await r.json().catch(() => ({}))
+        const body = await sendChatReceipt(r)
         // The server accepted neither `ok` nor `queued`, so nothing was sent.
         // Reported before the card logic below, which only runs on acceptance.
-        if (!body.ok && !body.queued) { reportFailedSend(body.error as string | undefined); return }
+        if (body.refused) { reportFailedSend(body.error); return }
         // A `queued` acceptance with no wire text is not an acceptance at all.
         // `chat_handlers` queues `if message:` but returns `{ok, queued}`
         // unconditionally, so an attachment-only send that raced the slot into
