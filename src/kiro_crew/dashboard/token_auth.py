@@ -80,6 +80,12 @@ from kiro_crew.mcp_gateway.socketsec import PeerCredResult, check_peer_is_self, 
 from kiro_crew.peer_resolve import resolve_peer_identity
 from kiro_crew.sel import sel as _sel_fn
 
+
+def internal_path_matches(path: str, entries: Iterable[str]) -> bool:
+    """Return whether *path* is an exact or child path of an internal route."""
+    return any(path == entry or path.startswith(entry + "/") for entry in entries)
+
+
 logger = logging.getLogger(__name__)
 
 # Alias of bump_revocation_gen: callers elsewhere import the private name
@@ -2072,13 +2078,8 @@ def token_auth_middleware(
         # Internal API paths: loopback + secret grants immediate access.
         # If the secret is missing (browser request), fall through to
         # normal cookie auth so dashboard pages can call these routes.
-        _matches_strict = internal_paths and (
-            path in internal_paths or any(path.startswith(p + "/") for p in internal_paths)
-        )
-        _matches_mixed = mixed_internal_paths and (
-            path in mixed_internal_paths
-            or any(path.startswith(p + "/") for p in mixed_internal_paths)
-        )
+        _matches_strict = internal_path_matches(path, internal_paths)
+        _matches_mixed = internal_path_matches(path, mixed_internal_paths)
         # local_only=False: treat ALL internal paths as mixed (backward compat
         # with mainline's local_only semantics — user opted into remote access)
         if not local_only and _matches_strict and not _matches_mixed:
