@@ -1122,13 +1122,19 @@ class TestRunProbe:
         assert out.strip() == "[]"
 
     @pytest.mark.asyncio
-    async def test_the_environment_is_an_allowlist_not_a_filtered_inherit(self, monkeypatch):
+    async def test_the_environment_is_an_allowlist_not_a_filtered_inherit(
+        self, monkeypatch, tmp_path
+    ):
         # A denylist covers the credential names it knows and, by construction,
         # cannot cover the ones it does not — `GH_TOKEN`, `KUBECONFIG`, `NPM_TOKEN`
         # and every future tool's variable would have reached the child. So the
         # environment is built from nothing instead of filtered down.
-        for name in ("GH_TOKEN", "GITHUB_TOKEN", "KUBECONFIG", "NPM_TOKEN", "HOME"):
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "KUBECONFIG", "NPM_TOKEN"):
             monkeypatch.setenv(name, f"leaked-{name}")
+        # HOME is path-resolved by the unsandboxed fallback. Keep the recognizable
+        # sentinel absolute so a host without user namespaces cannot create a
+        # leaked-HOME directory in the repository checkout.
+        monkeypatch.setenv("HOME", str(tmp_path / "leaked-HOME"))
         out = await tc._run_probe(["/bin/sh", "-c", "env"], None)
         assert out is not None
         assert "leaked-" not in out
