@@ -144,11 +144,11 @@ class TestLogout:
     @pytest.fixture
     def secret_home(self, monkeypatch, tmp_path):
         (tmp_path / ".local_secret").write_text("s3cr3t\n", encoding="utf-8", newline="\n")
-        monkeypatch.setattr(cli_server, "config_dir", lambda: tmp_path)
+        monkeypatch.setattr(cli_server, "read_local_secret", lambda _port: "s3cr3t")
         return tmp_path
 
     def test_missing_secret_reports_gateway_down(self, monkeypatch, tmp_path, capsys) -> None:
-        monkeypatch.setattr(cli_server, "config_dir", lambda: tmp_path)
+        monkeypatch.setattr(cli_server, "read_local_secret", lambda _port: "")
         with pytest.raises(SystemExit) as exc:
             cli_server._logout(5476)
         assert exc.value.code == 1

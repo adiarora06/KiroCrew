@@ -1533,7 +1533,7 @@ class TestLogout:
         """Successful logout prints success message."""
         secret_file = tmp_path / ".local_secret"
         secret_file.write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret")
 
         from kiro_crew.cli_server import _logout
 
@@ -1547,7 +1547,7 @@ class TestLogout:
 
     def test_logout_gateway_not_running(self, tmp_path, monkeypatch):
         """Missing secret file means gateway not running."""
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", lambda _port: "")
 
         from kiro_crew.cli_server import _logout
 
@@ -1561,7 +1561,7 @@ class TestLogout:
         """HTTP error from gateway is handled."""
         secret_file = tmp_path / ".local_secret"
         secret_file.write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret")
 
         from kiro_crew.cli_server import _logout
 
@@ -1581,6 +1581,7 @@ class TestLogout:
         secret_file.parent.mkdir(parents=True, exist_ok=True)
         secret_file.write_text("test-secret")
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret")
 
         from kiro_crew.cli_server import _logout
 
@@ -3777,11 +3778,10 @@ class TestConfigDirOverride:
 
         assert _detect_project_dir() == str(proj.resolve())
 
-    def test_logout_reads_secret_from_config_dir(self, tmp_path, monkeypatch):
-        """_logout reads .local_secret from config_dir(), not ~/.kirocrew."""
-        secret_file = tmp_path / ".local_secret"
-        secret_file.write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+    def test_logout_reads_secret_for_listener_port(self, monkeypatch):
+        """_logout resolves the secret paired with the requested listener."""
+        read_secret = MagicMock(return_value="test-secret")
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", read_secret)
 
         from kiro_crew.cli_server import _logout
 
@@ -3792,6 +3792,7 @@ class TestConfigDirOverride:
 
         with patch("kiro_crew.cli_server.loopback_urlopen", return_value=mock_resp):
             _logout(5476)
+        read_secret.assert_called_once_with(5476)
 
     def test_setup_slack_tokens_writes_to_config_dir(self, tmp_path, monkeypatch):
         """_setup_slack_tokens writes .env to config_dir(), not ~/.kirocrew."""
@@ -3901,23 +3902,23 @@ class TestSpawnCliAuth:
     """
 
     def test_internal_secret_reads_local_secret_file(self, tmp_path, monkeypatch):
-        (tmp_path / ".local_secret").write_text("abc123\n")
-        monkeypatch.setattr("kiro_crew.cli_commands.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_commands.read_local_secret", lambda _port: "abc123")
 
         from kiro_crew.cli_commands import _internal_secret
 
-        assert _internal_secret() == "abc123"
+        assert _internal_secret(5476) == "abc123"
 
     def test_internal_secret_returns_empty_when_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("kiro_crew.cli_commands.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_commands.read_local_secret", lambda _port: "")
 
         from kiro_crew.cli_commands import _internal_secret
 
-        assert _internal_secret() == ""
+        assert _internal_secret(5476) == ""
 
     def test_spawn_list_sends_internal_secret_header(self, tmp_path, monkeypatch, capsys):
-        (tmp_path / ".local_secret").write_text("test-secret-xyz")
-        monkeypatch.setattr("kiro_crew.cli_commands.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_commands.read_local_secret", lambda _port: "test-secret-xyz"
+        )
 
         captured: list[urllib.request.Request] = []
         mock_resp = MagicMock()
@@ -3943,8 +3944,9 @@ class TestSpawnCliAuth:
         assert headers_lower["x-internal-secret"] == "test-secret-xyz"
 
     def test_spawn_run_sends_internal_secret_header(self, tmp_path, monkeypatch, capsys):
-        (tmp_path / ".local_secret").write_text("run-secret-abc")
-        monkeypatch.setattr("kiro_crew.cli_commands.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_commands.read_local_secret", lambda _port: "run-secret-abc"
+        )
 
         captured: list[urllib.request.Request] = []
         mock_resp = MagicMock()
@@ -3973,8 +3975,7 @@ class TestSpawnCliAuth:
 
     def test_spawn_list_403_prints_token_required(self, tmp_path, monkeypatch, capsys):
         """A bare 403 from the gateway is reported, not masked as 'not running'."""
-        (tmp_path / ".local_secret").write_text("")
-        monkeypatch.setattr("kiro_crew.cli_commands.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_commands.read_local_secret", lambda _port: "")
 
         def fake_urlopen(*_args: object, **_kwargs: object) -> None:
             raise urllib.error.HTTPError(
@@ -4654,9 +4655,9 @@ class TestPrintTokenUrl:
     def test_prints_token_on_success(self, tmp_path, capsys, monkeypatch):
         from kiro_crew.cli_server import _print_token_url
 
-        secret_file = tmp_path / ".local_secret"
-        secret_file.write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret"
+        )
         monkeypatch.setattr(
             "kiro_crew.cli_server.KiroCrewConfig.load",
             lambda: MagicMock(dashboard=MagicMock(url="")),
@@ -4685,9 +4686,9 @@ class TestPrintTokenUrl:
     def test_prints_custom_origin(self, tmp_path, capsys, monkeypatch):
         from kiro_crew.cli_server import _print_token_url
 
-        secret_file = tmp_path / ".local_secret"
-        secret_file.write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret"
+        )
         monkeypatch.setattr(
             "kiro_crew.cli_server.KiroCrewConfig.load",
             lambda: MagicMock(dashboard=MagicMock(url="http://kirocrew.dev:7777")),
@@ -4710,9 +4711,9 @@ class TestPrintTokenUrl:
     def test_fallback_on_timeout(self, tmp_path, capsys, monkeypatch):
         from kiro_crew.cli_server import _print_token_url
 
-        secret_file = tmp_path / ".local_secret"
-        secret_file.write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret"
+        )
         monkeypatch.setattr("kiro_crew.cli_server._RESTART_READY_TIMEOUT", 0)
 
         _print_token_url(7777)
@@ -4723,7 +4724,7 @@ class TestPrintTokenUrl:
     def test_fallback_on_no_secret(self, tmp_path, capsys, monkeypatch):
         from kiro_crew.cli_server import _print_token_url
 
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", lambda _port: "")
         monkeypatch.setattr("kiro_crew.cli_server._RESTART_READY_TIMEOUT", 0)
 
         _print_token_url(7777)
@@ -5067,8 +5068,9 @@ class TestTokenCommand:
     def test_prints_loopback_only(self, tmp_path, capsys, monkeypatch):
         from kiro_crew.cli_server import _token
 
-        (tmp_path / ".local_secret").write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret"
+        )
         monkeypatch.setattr(
             "kiro_crew.cli_server.KiroCrewConfig.load",
             lambda: MagicMock(dashboard=MagicMock(url="")),
@@ -5098,8 +5100,9 @@ class TestTokenCommand:
     def test_separates_custom_origin_with_blank_line(self, tmp_path, capsys, monkeypatch):
         from kiro_crew.cli_server import _token
 
-        (tmp_path / ".local_secret").write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "kiro_crew.cli_server.read_local_secret", lambda _port: "test-secret"
+        )
         monkeypatch.setattr(
             "kiro_crew.cli_server.KiroCrewConfig.load",
             lambda: MagicMock(dashboard=MagicMock(url="https://kirocrew.dev:7777")),
@@ -5136,9 +5139,8 @@ class TestTokenCommand:
     # a bare "<no stderr>".
 
     def _stub_token_env(self, tmp_path, monkeypatch, *, secret: bool = True) -> None:
-        if secret:
-            (tmp_path / ".local_secret").write_text("test-secret")
-        monkeypatch.setattr("kiro_crew.cli_server.config_dir", lambda: tmp_path)
+        value = "test-secret" if secret else ""
+        monkeypatch.setattr("kiro_crew.cli_server.read_local_secret", lambda _port: value)
         monkeypatch.setattr(
             "kiro_crew.cli_server.KiroCrewConfig.load",
             lambda: MagicMock(dashboard=MagicMock(url="")),

@@ -25,6 +25,7 @@ from kiro_crew.config.loader import (
     build_provider_factory,
     config_dir,
     config_path,
+    read_local_secret,
 )
 from kiro_crew.constants import DATA_WARNING
 from kiro_crew.context import ContextBuilder
@@ -145,10 +146,8 @@ def _token(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     port = resolve_client_port(args.port)
-    secret_path = config_dir() / ".local_secret"
-    try:
-        secret = secret_path.read_text().strip()
-    except FileNotFoundError:
+    secret = read_local_secret(port)
+    if not secret:
         print("❌ Gateway not running — start it with: kirocrew gateway", file=sys.stderr)
         sys.exit(1)
 
@@ -273,10 +272,8 @@ def _emit_session_urls(port: int, token: str) -> None:
 
 def _logout(port: int) -> None:
     """Revoke all dashboard sessions by calling the gateway's /api/logout endpoint."""
-    secret_path = config_dir() / ".local_secret"
-    try:
-        secret = secret_path.read_text().strip()
-    except FileNotFoundError:
+    secret = read_local_secret(port)
+    if not secret:
         print("❌ Gateway not running — start it with: kirocrew gateway")
         sys.exit(1)
 
@@ -772,11 +769,13 @@ def _wait_gateway_ready(
 
 def _print_token_url(port: int) -> None:
     """Wait for the gateway to come up, then print a fresh token URL."""
-    secret_path = config_dir() / ".local_secret"
     deadline = time.monotonic() + _RESTART_READY_TIMEOUT
     while time.monotonic() < deadline:
         try:
-            secret = secret_path.read_text().strip()
+            secret = read_local_secret(port)
+            if not secret:
+                time.sleep(_RESTART_READY_POLL_INTERVAL)
+                continue
             url = f"http://{_CLI_LOOPBACK}:{port}/api/token/local?ttl={_RESTART_TOKEN_TTL}"
             req = urllib.request.Request(url, headers={"X-Local-Secret": secret})
             with loopback_urlopen(req, timeout=3) as resp:

@@ -52,6 +52,7 @@ from kiro_crew.config.loader import (
     config_local_path,
     config_path,
     read_config_for_update,
+    read_local_secret,
     update_config_locked,
 )
 from kiro_crew.cron import CronSchedule, CronService, format_schedule
@@ -169,7 +170,7 @@ def _format_schedule(schedule: object) -> str:
     return format_schedule(schedule)
 
 
-def _internal_secret() -> str:
+def _internal_secret(port: int) -> str:
     """Read the per-session IPC secret written by the gateway.
 
     The gateway writes ``~/.kiro/crew/.local_secret`` (mode 0600) after a
@@ -182,10 +183,7 @@ def _internal_secret() -> str:
     server then rejects the request with 403, which is the correct
     failure mode.
     """
-    try:
-        return (config_dir() / ".local_secret").read_text().strip()
-    except Exception:
-        return ""
+    return read_local_secret(port)
 
 
 def _spawn(args: argparse.Namespace) -> None:
@@ -196,7 +194,7 @@ def _spawn(args: argparse.Namespace) -> None:
     if action == "list":
         req = urllib.request.Request(
             f"{base}/api/spawn",
-            headers={"X-Internal-Secret": _internal_secret()},
+            headers={"X-Internal-Secret": _internal_secret(args.port)},
         )
         try:
             with loopback_urlopen(req, timeout=5) as resp:
@@ -235,7 +233,7 @@ def _spawn_run(args: argparse.Namespace, base: str) -> None:
         data=data,
         headers={
             "Content-Type": "application/json",
-            "X-Internal-Secret": _internal_secret(),
+            "X-Internal-Secret": _internal_secret(args.port),
         },
     )
     try:
@@ -262,7 +260,7 @@ def _spawn_run(args: argparse.Namespace, base: str) -> None:
 
     print(f"Spawned subagent {agent_id}, waiting for result...", file=sys.stderr)
     poll_url = f"{base}/api/spawn/{agent_id}"
-    secret = _internal_secret()
+    secret = _internal_secret(args.port)
     while True:
         _time.sleep(2)
         poll_req = urllib.request.Request(poll_url, headers={"X-Internal-Secret": secret})
@@ -1641,7 +1639,7 @@ def _artifact(args: argparse.Namespace) -> None:
 
     action = getattr(args, "artifact_action", None) or "list"
 
-    headers: dict[str, str] = {"X-Internal-Secret": _internal_secret()}
+    headers: dict[str, str] = {"X-Internal-Secret": _internal_secret(port)}
 
     def _request(method: str, path: str, body: dict | None = None) -> dict:
         data = json.dumps(body).encode() if body is not None else None
