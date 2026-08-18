@@ -9,6 +9,7 @@ import { openActivityPanel, sseSubagentQueued } from '../store/chatSlice'
 import SegmentedControl from '../components/SegmentedControl'
 import { ApiError } from '../api/client'
 import { safeSetItem } from '../utils/safeStorage'
+import { FEATURE_REQUEST_PROMPT_FALLBACK } from '../prompts/featureRequest'
 
 /** A failure `POST /api/chat/slots/{slot}/agent` really can return today. */
 const REAL_FAILURE = 'invalid agent name'
@@ -97,6 +98,9 @@ vi.mock('../api/client', () => ({
       env_var: 'KIROCREW_TELEMETRY_DISABLED',
     }),
     patchConfig: vi.fn().mockResolvedValue({}),
+    createChatSlot: vi.fn().mockResolvedValue({ key: 'feature-slot', title: 'feature-slot', messages: 0, running: false }),
+    chatSlotContext: vi.fn().mockResolvedValue({ ok: true }),
+    sendChat: vi.fn().mockResolvedValue({ ok: true }),
   },
   // Default to "no auth banner showing" so existing App tests render the
   // normal connected/offline pill paths. The dedicated auth-banner
@@ -1029,6 +1033,36 @@ describe('App routing', () => {
     expect(screen.getByRole('button', { name: 'Request a Feature' })).toBeInTheDocument()
     expect(localStorage.getItem('mc-nav')).toBe('0')
     localStorage.removeItem('mc-nav')
+  })
+
+  it('keeps feature-request instructions hidden from the persisted user message', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api.createChatSlot).mockClear()
+    vi.mocked(api.chatSlotContext).mockClear()
+    vi.mocked(api.sendChat).mockClear()
+    renderWithProviders(<App />, { route: '/chat' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request a Feature' }))
+
+    await waitFor(() => {
+      expect(api.chatSlotContext).toHaveBeenCalledWith(
+        'feature-slot',
+        FEATURE_REQUEST_PROMPT_FALLBACK,
+        // maxAge bounds the hidden seed's lifetime so a failed visible send
+        // cannot leave it queued for a later, unrelated message.
+        { source: 'feature-request', maxAge: 60 },
+      )
+      expect(api.sendChat).toHaveBeenCalledWith(
+        'I’d like to request a feature!',
+        'feature-slot',
+        expect.any(String),
+      )
+    })
+    expect(api.sendChat).not.toHaveBeenCalledWith(
+      FEATURE_REQUEST_PROMPT_FALLBACK,
+      expect.anything(),
+      expect.anything(),
+    )
   })
 
   it('renders connection status', () => {
