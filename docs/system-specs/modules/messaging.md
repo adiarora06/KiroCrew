@@ -508,9 +508,12 @@ DM denials and authorization failures in configured threads are SEL-audited.
 Because Discord's global guild/message-content intents deliver every visible
 channel message, unrelated guild chatter is discarded silently; an approved
 user attempting an unapproved thread remains audit-worthy. Guild turns require
-both an approved sender and an exact `discord.allowed_thread_ids` match, then a
-REST channel lookup must confirm Discord type 10/11/12 before dispatch. Normal
-guild channels are always rejected. An approved thread is a shared disclosure
+an approved sender and either an exact `discord.allowed_thread_ids` match or an
+exact `discord.allowed_channel_ids` match. An allowed channel message is never
+handled in the shared channel itself: with `discord.auto_thread` enabled, the
+transport creates a public thread from that message and dispatches the turn
+there. Existing thread IDs still require a REST channel lookup confirming
+Discord type 10/11/12. An approved thread is a shared disclosure
 boundary: every member who can view it can read agent/tool output. Enabling any
 thread also means Discord delivers message content from every server channel
 the bot can see, although Kiro Crew immediately discards traffic outside
@@ -558,8 +561,9 @@ An inbound resume binding lives on the bound session's `session_map.json` row. A
   and are verified against Discord `GET /users/@me` before storage; rejection
   returns 400 and writes nothing, network failure saves with
   `verify_warning`. `bot_token_clear` must be a strict boolean.
-  `allowed_user_ids` and `allowed_thread_ids` accept numeric snowflake strings
-  only. Secrets land in `config_dir/.env` (atomic 0600) with `os.environ`
+  `allowed_user_ids`, `allowed_thread_ids`, and `allowed_channel_ids` accept
+  numeric snowflake strings only; `auto_thread` is a strict boolean. Secrets
+  land in `config_dir/.env` (atomic 0600) with `os.environ`
   synced; non-secrets go to
   `config.json` under `discord`. All fields are boot-read, so
   `restart_required` is true on any actual change.

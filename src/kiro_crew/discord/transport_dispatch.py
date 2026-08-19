@@ -176,6 +176,10 @@ class DiscordDispatcher:
         # Kept as a direct alias for diagnostics/tests; the controller owns it.
         self._session_pickers = self._session_resume.pickers
 
+    def register_allowed_thread(self, thread_id: str) -> None:
+        """Authorize interactions in a thread created by the inbound transport."""
+        self._allowed_threads.add(thread_id)
+
     # ── Turn dispatch (transport's dispatch callback) ──────────────────────
 
     async def handle_message(

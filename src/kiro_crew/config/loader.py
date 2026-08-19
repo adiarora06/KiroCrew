@@ -5345,6 +5345,22 @@ class DiscordConfig:
             tags=["discord"],
         ),
     )
+    allowed_channel_ids: list[str] = field(
+        default_factory=list,
+        metadata=_meta(
+            "Allowed Channel IDs",
+            "Discord server channels where approved users may start a new agent thread.",
+            tags=["discord"],
+        ),
+    )
+    auto_thread: bool = field(
+        default=True,
+        metadata=_meta(
+            "Auto-create Threads",
+            "Create one Discord thread per approved message in an allowed channel.",
+            tags=["discord"],
+        ),
+    )
     soft_threshold_pct: int = field(
         default=80,
         metadata=_meta(
@@ -6323,6 +6339,8 @@ class KiroCrewConfig:
                 # transport's string comparison).
                 allowed_user_ids=_coerce_str_ids(discord_data.get("allowed_user_ids")),
                 allowed_thread_ids=_coerce_str_ids(discord_data.get("allowed_thread_ids")),
+                allowed_channel_ids=_coerce_str_ids(discord_data.get("allowed_channel_ids")),
+                auto_thread=bool(discord_data.get("auto_thread", True)),
                 soft_threshold_pct=max(
                     1, min(100, _coerce_int(discord_data.get("soft_threshold_pct"), 80))
                 ),

@@ -83,6 +83,7 @@ class FakeClient:
         self.acked: list[str] = []
         self.reactions: list[tuple[str, str]] = []
         self.thread_channels: set[str] = set()
+        self.created_threads: list[tuple[str, str, str]] = []
         self.attachment_bodies: dict[str, bytes] = {}
         self.attachment_downloads: list[str] = []
         self._mid = 100
@@ -131,6 +132,14 @@ class FakeClient:
 
     async def create_dm_channel(self, user_id: str) -> str:
         return f"dm-{user_id}"
+
+    async def create_thread_from_message(
+        self, channel_id: str, message_id: str, name: str
+    ) -> str:
+        thread_id = f"thread-{message_id}"
+        self.created_threads.append((channel_id, message_id, name))
+        self.thread_channels.add(thread_id)
+        return thread_id
 
     async def download_attachment(self, url: str, dest: str) -> None:
         self.attachment_downloads.append(url)
@@ -1092,7 +1101,10 @@ class TestConfiguredTargets:
 
 class TestTransportReceive:
     def _transport(
-        self, allowed: list[str], allowed_threads: list[str] | None = None
+        self,
+        allowed: list[str],
+        allowed_threads: list[str] | None = None,
+        allowed_channels: list[str] | None = None,
     ) -> tuple[DiscordTransport, list[InboundMessage], FakeClient]:
         dispatched: list[InboundMessage] = []
 
@@ -1105,6 +1117,7 @@ class TestTransportReceive:
             client,  # type: ignore[arg-type]
             allowed_user_ids=allowed,
             allowed_thread_ids=allowed_threads or [],
+            allowed_channel_ids=allowed_channels or [],
             dispatch=_dispatch,
         )
         return t, dispatched, client
@@ -1155,6 +1168,99 @@ class TestTransportReceive:
         await t.receive(DiscordInbound(channel_id="t1", user_id="u1", text="hello", guild_id="g1"))
         assert len(dispatched) == 1
         assert dispatched[0].thread_id == "t1"
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_channel_creates_thread_before_dispatch(self) -> None:
+        t, dispatched, client = self._transport(["u1"], allowed_channels=["c1"])
+        await t.receive(
+            DiscordInbound(
+                channel_id="c1",
+                user_id="u1",
+                text="Plan the release",
+                message_id="m1",
+                guild_id="g1",
+            )
+        )
+
+        assert client.created_threads == [("c1", "m1", "Plan the release")]
+        assert len(dispatched) == 1
+        assert dispatched[0].conversation_id == "thread-m1"
+        assert dispatched[0].thread_id == "thread-m1"
+
+    @pytest.mark.asyncio
+    async def test_followup_message_in_auto_created_thread_dispatches(self) -> None:
+        """The thread the transport just created must be immediately valid for
+        the same user's next message, not just for button interactions -- a
+        frozen ``_allowed_threads`` would silently strand every reply."""
+        t, dispatched, _ = self._transport(["u1"], allowed_channels=["c1"])
+        await t.receive(
+            DiscordInbound(
+                channel_id="c1",
+                user_id="u1",
+                text="Plan the release",
+                message_id="m1",
+                guild_id="g1",
+            )
+        )
+        assert len(dispatched) == 1
+        created_thread_id = dispatched[0].conversation_id
+
+        await t.receive(
+            DiscordInbound(
+                channel_id=created_thread_id,
+                user_id="u1",
+                text="Here's a follow-up",
+                message_id="m2",
+                guild_id="g1",
+            )
+        )
+
+        assert len(dispatched) == 2
+        assert dispatched[1].conversation_id == created_thread_id
+        assert dispatched[1].thread_id == created_thread_id
+        assert dispatched[1].text == "Here's a follow-up"
+
+    @pytest.mark.asyncio
+    async def test_channels_governance_denial_blocks_thread_creation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A runtime channels-governance deny must stop the REST thread-create
+        call itself -- not just the turn that would have followed it -- since
+        creating the thread is a visible, irreversible side effect."""
+
+        async def _denied(_channel_type: str) -> bool:
+            return False
+
+        monkeypatch.setattr("kiro_crew.discord.transport.channel_inbound_permitted", _denied)
+        t, dispatched, client = self._transport(["u1"], allowed_channels=["c1"])
+        await t.receive(
+            DiscordInbound(
+                channel_id="c1",
+                user_id="u1",
+                text="Plan the release",
+                message_id="m1",
+                guild_id="g1",
+            )
+        )
+
+        assert client.created_threads == []
+        assert dispatched == []
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_channel_rejects_unapproved_user_without_thread(self) -> None:
+        t, dispatched, client = self._transport(["u1"], allowed_channels=["c1"])
+        await t.receive(
+            DiscordInbound(
+                channel_id="c1",
+                user_id="u2",
+                text="hello",
+                message_id="m1",
+                guild_id="g1",
+            )
+        )
+
+        assert client.created_threads == []
+        assert dispatched == []
 
     @pytest.mark.asyncio
     async def test_normal_channel_denied_even_if_id_is_allowlisted(self) -> None:

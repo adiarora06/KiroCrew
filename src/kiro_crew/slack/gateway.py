@@ -1050,6 +1050,10 @@ class GatewayOrchestrator:
         self._discord_allowed_thread_ids: list[str] = [
             str(t) for t in cfg.discord.allowed_thread_ids
         ]
+        self._discord_allowed_channel_ids: list[str] = [
+            str(c) for c in cfg.discord.allowed_channel_ids
+        ]
+        self._discord_auto_thread = bool(cfg.discord.auto_thread)
         self._discord_client: "DiscordClient | None" = None
         # Webex — the WEBEX_BOT_TOKEN credential (env/.env) overrides
         # cfg.webex.bot_token; all other settings come from the typed

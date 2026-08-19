@@ -2762,6 +2762,8 @@ async def api_discord_config_get(request: web.Request) -> web.Response:
             "enabled": bool(dc.enabled),
             "allowed_user_ids": [str(u) for u in dc.allowed_user_ids],
             "allowed_thread_ids": [str(t) for t in dc.allowed_thread_ids],
+            "allowed_channel_ids": [str(c) for c in dc.allowed_channel_ids],
+            "auto_thread": bool(dc.auto_thread),
             "soft_threshold_pct": int(dc.soft_threshold_pct),
             "session_folder": dc.session_folder,
         }
@@ -2903,6 +2905,31 @@ async def _discord_config_save_locked(request: web.Request) -> web.Response:
         if new_ids != [str(t) for t in dc_cfg.get("allowed_thread_ids", [])]:
             staged["allowed_thread_ids"] = new_ids
             applied.append("allowed_thread_ids")
+
+    if "allowed_channel_ids" in body:
+        raw_ids = body.get("allowed_channel_ids")
+        if not isinstance(raw_ids, list):
+            return _deny("allowed_channel_ids must be a list")
+        new_ids = []
+        for item in raw_ids:
+            s = str(item).strip()
+            if not s:
+                continue
+            if not s.isdigit():
+                return _deny(f"invalid Discord channel ID: {s} (numeric IDs only)")
+            if s not in new_ids:
+                new_ids.append(s)
+        if new_ids != [str(c) for c in dc_cfg.get("allowed_channel_ids", [])]:
+            staged["allowed_channel_ids"] = new_ids
+            applied.append("allowed_channel_ids")
+
+    if "auto_thread" in body:
+        val = body.get("auto_thread")
+        if not isinstance(val, bool):
+            return _deny("auto_thread must be a boolean")
+        if val != bool(dc_cfg.get("auto_thread", True)):
+            staged["auto_thread"] = val
+            applied.append("auto_thread")
 
     if "soft_threshold_pct" in body:
         pct = body.get("soft_threshold_pct")
