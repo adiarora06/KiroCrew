@@ -26,6 +26,7 @@ import errno
 import functools
 import json
 import logging
+import math
 import os
 import re
 import select
@@ -3889,10 +3890,27 @@ def _cgroup_limits_from_config() -> tuple[int, int, int, int]:
         rl = _raw_config().get("resource_limits")
         if isinstance(rl, dict):
             p = rl.get("max_processes")
-            if isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0:
+            # Compare the raw number, not ``int(p)``: config.json (parsed by
+            # Python's permissive json.loads) can carry NaN/Infinity, and
+            # ``int()`` on either raises — inside the try/except below that
+            # would abort parsing of every remaining field (m, w, q), silently
+            # discarding an operator's otherwise-valid stricter limits. A
+            # fraction such as 0.5 still correctly falls through to the
+            # default here, since it truncates to invalid TasksMax=0.
+            if (
+                isinstance(p, (int, float))
+                and not isinstance(p, bool)
+                and math.isfinite(p)
+                and p >= 1
+            ):
                 max_procs = int(p)
             m = rl.get("max_memory_mb")
-            if isinstance(m, (int, float)) and not isinstance(m, bool) and m > 0:
+            if (
+                isinstance(m, (int, float))
+                and not isinstance(m, bool)
+                and math.isfinite(m)
+                and m >= 1
+            ):
                 max_mem_mb = int(m)
             w = rl.get("cpu_weight")
             if isinstance(w, (int, float)) and not isinstance(w, bool) and 1 <= w <= 10000:
