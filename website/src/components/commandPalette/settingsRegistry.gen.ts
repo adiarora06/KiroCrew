@@ -1001,6 +1001,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "configKey": "telemetry.enabled"
   },
   {
+    "id": "privacy.send-anonymous-usage-heartbeat",
+    "label": "Send anonymous usage heartbeat",
+    "labelKey": "privacyDisclosure.toggleLabel",
+    "description": "Saved for future launches.",
+    "tab": "privacy",
+    "type": "toggle",
+    "occurrence": 1,
+    "configKey": "telemetry.beacon_enabled"
+  },
+  {
     "id": "security.denied-commands",
     "labelKey": "pages.settings.securityPanel.denied_commands",
     "tab": "security",
