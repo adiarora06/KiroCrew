@@ -8700,6 +8700,7 @@
       "switching": "전환 중…",
       "tags": "태그",
       "temporary_no_memory_reads_or_writes": "임시 — 메모리 읽기·쓰기 없음",
+      "this_session_cannot_be_opened_from_the_chat_side": "‘{{title}}’은(는) 채팅 사이드바에서 열 수 없습니다 — {{surface}} 세션입니다.",
       "thinking": "생각 중…",
       "today": "오늘",
       "unfiled": "미분류",

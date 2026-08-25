@@ -8698,6 +8698,7 @@
       "switching": "切り替え中…",
       "tags": "タグ",
       "temporary_no_memory_reads_or_writes": "一時セッション — メモリの読み書きなし",
+      "this_session_cannot_be_opened_from_the_chat_side": "「{{title}}」はチャットサイドバーから開けません — これは {{surface}} セッションです。",
       "thinking": "考え中…",
       "today": "今日",
       "unfiled": "未整理",

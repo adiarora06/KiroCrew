@@ -8952,6 +8952,7 @@
       "switching": "Changement…",
       "tags": "Étiquettes",
       "temporary_no_memory_reads_or_writes": "Temporaire — aucune lecture ni écriture en mémoire",
+      "this_session_cannot_be_opened_from_the_chat_side": "« {{title}} » ne peut pas être ouvert depuis la barre latérale du chat — c'est une session {{surface}}.",
       "thinking": "Réflexion…",
       "today": "Aujourd’hui",
       "unfiled": "Non classés",

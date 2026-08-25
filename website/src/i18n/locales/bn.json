@@ -8826,6 +8826,7 @@
       "switching": "সুইচ হচ্ছে…",
       "tags": "ট্যাগ",
       "temporary_no_memory_reads_or_writes": "অস্থায়ী — মেমরি পড়া বা লেখা হবে না",
+      "this_session_cannot_be_opened_from_the_chat_side": "\"{{title}}\" চ্যাট সাইডবার থেকে খোলা যাবে না — এটি একটি {{surface}} সেশন।",
       "thinking": "ভাবছে…",
       "today": "আজ",
       "unfiled": "ফোল্ডারবিহীন",

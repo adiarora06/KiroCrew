@@ -8952,6 +8952,7 @@
       "switching": "Passaggio…",
       "tags": "Tag",
       "temporary_no_memory_reads_or_writes": "Temporaneo — nessuna lettura o scrittura in memoria",
+      "this_session_cannot_be_opened_from_the_chat_side": "Impossibile aprire \"{{title}}\" dalla barra laterale della chat: è una sessione {{surface}}.",
       "thinking": "Riflessione…",
       "today": "Oggi",
       "unfiled": "Non archiviate",

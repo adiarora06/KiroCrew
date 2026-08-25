@@ -9078,6 +9078,7 @@
       "switching": "Переключение…",
       "tags": "Теги",
       "temporary_no_memory_reads_or_writes": "Временная — без чтения и записи памяти",
+      "this_session_cannot_be_opened_from_the_chat_side": "«{{title}}» нельзя открыть из боковой панели чата — это сеанс {{surface}}.",
       "thinking": "Размышление…",
       "today": "Сегодня",
       "unfiled": "Без папки",

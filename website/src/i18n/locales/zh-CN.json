@@ -8700,6 +8700,7 @@
       "switching": "正在切换…",
       "tags": "标签",
       "temporary_no_memory_reads_or_writes": "临时 — 不读取也不写入记忆",
+      "this_session_cannot_be_opened_from_the_chat_side": "\"{{title}}\"无法从聊天侧边栏打开——它是 {{surface}} 会话。",
       "thinking": "正在思考…",
       "today": "今天",
       "unfiled": "未归档",

@@ -8826,6 +8826,7 @@
       "switching": "स्विच हो रहा है…",
       "tags": "टैग",
       "temporary_no_memory_reads_or_writes": "अस्थायी — मेमोरी में कोई पठन या लेखन नहीं",
+      "this_session_cannot_be_opened_from_the_chat_side": "\"{{title}}\" चैट साइडबार से नहीं खोला जा सकता — यह एक {{surface}} सत्र है।",
       "thinking": "सोच रहा है…",
       "today": "आज",
       "unfiled": "अवर्गीकृत",

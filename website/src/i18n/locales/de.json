@@ -8826,6 +8826,7 @@
       "switching": "Wird gewechselt…",
       "tags": "Tags",
       "temporary_no_memory_reads_or_writes": "Temporär — kein Lesen oder Schreiben in die Erinnerung",
+      "this_session_cannot_be_opened_from_the_chat_side": "„{{title}}“ kann nicht über die Chat-Seitenleiste geöffnet werden — es ist eine {{surface}}-Sitzung.",
       "thinking": "Denkt nach…",
       "today": "Heute",
       "unfiled": "Nicht zugeordnet",

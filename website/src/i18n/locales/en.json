@@ -5885,6 +5885,7 @@
       "switch_all_to_model": "Switch all to model…",
       "tags": "Tags",
       "temporary_no_memory_reads_or_writes": "Temporary — no memory reads or writes",
+      "this_session_cannot_be_opened_from_the_chat_side": "\"{{title}}\" can't be opened from the chat sidebar — it's a {{surface}} session.",
       "untagged": "+ untagged",
       "will_be_moved_to_older_sessions": "will be moved to older sessions.",
       "within": "Within",
