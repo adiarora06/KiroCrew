@@ -91,6 +91,67 @@ class TestDequeueNextSystemMessage:
         assert [q["content"] for q in slot._queue] == ["user follow-up"]
 
 
+class TestDequeueExcludeCron:
+    """`exclude_cron=True` holds cron notifications while a multi-stage plan runs.
+
+    Each stage is its own ``_run_chat`` whose tail-drain fires while
+    ``_in_stage_execution`` is still set (chat_runner ``_start_next_queued_turn``
+    passes ``exclude_cron=in_stage``). A cron queued mid-plan must NOT be pulled
+    between stages; sub-agent completions and recovery still flow.
+    """
+
+    def test_holds_cron_when_only_cron_queued(self):
+        """A lone cron notification is held (drains nothing) under exclude_cron."""
+        cron = f"{CRON_NOTIFY_PREFIX}daily]: run report"
+        slot = _ChatSlot("s1")
+        slot._queue = [{"id": "a", "content": cron, "kind": CRON_NOTIFICATION_KIND}]
+
+        next_msg, consumed = _dequeue_next_system_message(slot, exclude_cron=True)
+
+        assert next_msg is None
+        assert consumed == []
+        # Cron stays queued for the end-of-plan drain.
+        assert [q["content"] for q in slot._queue] == [cron]
+
+    def test_still_drains_subagent_completion(self):
+        """A sub-agent completion still flows even with exclude_cron=True."""
+        sa = f"{SUBAGENT_COMPLETION_PREFIX}\nAgent `a1` completed ✅\nResult"
+        slot = _ChatSlot("s1")
+        slot._queue = [{"id": "a", "content": sa, "kind": SUBAGENT_COMPLETION_KIND}]
+
+        next_msg, consumed = _dequeue_next_system_message(slot, exclude_cron=True)
+
+        assert next_msg == sa
+        assert slot._queue == []
+
+    def test_skips_cron_drains_later_subagent(self):
+        """Cron ahead of a sub-agent completion is skipped; the completion drains."""
+        cron = f"{CRON_NOTIFY_PREFIX}daily]: run report"
+        sa = f"{SUBAGENT_COMPLETION_PREFIX}\nAgent `a1` completed ✅\nResult"
+        slot = _ChatSlot("s1")
+        slot._queue = [
+            {"id": "a", "content": cron, "kind": CRON_NOTIFICATION_KIND},
+            {"id": "b", "content": sa, "kind": SUBAGENT_COMPLETION_KIND},
+        ]
+
+        next_msg, consumed = _dequeue_next_system_message(slot, exclude_cron=True)
+
+        assert next_msg == sa
+        # The cron is left queued; only the completion was consumed.
+        assert [q["content"] for q in slot._queue] == [cron]
+
+    def test_default_still_drains_cron(self):
+        """Default (exclude_cron=False) keeps the pre-fix behavior: cron drains."""
+        cron = f"{CRON_NOTIFY_PREFIX}daily]: run report"
+        slot = _ChatSlot("s1")
+        slot._queue = [{"id": "a", "content": cron, "kind": CRON_NOTIFICATION_KIND}]
+
+        next_msg, consumed = _dequeue_next_system_message(slot)
+
+        assert next_msg == cron
+        assert slot._queue == []
+
+
 # ── API test: api_chat ingest gate (idle + sub-agents running) ──
 
 
@@ -103,7 +164,8 @@ class TestApiChatSubagentQueueGate:
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
         ran = {"called": False}
 
-        async def fake_run_chat(st, sl, msg):
+        async def fake_run_chat(st, sl, msg, *, _directive_user_origin):
+            assert _directive_user_origin is True
             ran["called"] = True
 
         monkeypatch.setattr("kiro_crew.dashboard.chat_handlers._run_chat", fake_run_chat)
@@ -126,7 +188,8 @@ class TestApiChatSubagentQueueGate:
     async def test_not_queued_when_no_subagents_running(self, tmp_path, monkeypatch):
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
 
-        async def fake_run_chat(st, sl, msg):
+        async def fake_run_chat(st, sl, msg, *, _directive_user_origin):
+            assert _directive_user_origin is True
             return None
 
         monkeypatch.setattr("kiro_crew.dashboard.chat_handlers._run_chat", fake_run_chat)

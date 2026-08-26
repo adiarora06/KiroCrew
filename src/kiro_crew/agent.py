@@ -35,12 +35,14 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, MutableMapping
 
 from kiro_crew import agent_state, platform_compat
+from kiro_crew.agent_discovery import _read_agent_spec
 from kiro_crew.agent_files import (
     AGENT_FILENAME,
 )
+from kiro_crew.agent_files import CONDUCTOR_AGENT_FILENAME as _CONDUCTOR_AGENT_FILENAME
 from kiro_crew.agent_files import HEARTBEAT_AGENT_FILENAME as _HEARTBEAT_AGENT_FILENAME
 from kiro_crew.agent_files import KNOWLEDGE_AGENT_FILENAME as _KNOWLEDGE_AGENT_FILENAME
 from kiro_crew.agent_files import LITE_AGENT_FILENAME as _LITE_AGENT_FILENAME
@@ -49,16 +51,26 @@ from kiro_crew.agent_files import (
     REQUIRED_KIRO_AGENT_FILES,
 )
 from kiro_crew.agent_files import RESEARCH_AGENT_FILENAME as _RESEARCH_AGENT_FILENAME
+from kiro_crew.atomic_write import replace_with_retry
 from kiro_crew.config import config_dir
 from kiro_crew.config import config_path as _mc_config_path
 from kiro_crew.config.paths import (
     _in_ephemeral_tree,
     _in_linked_git_worktree,
+    _under_system_tmp,
     _valid_override_home,
+    ambient_agents_dir,
     isolated_agents_dir,
     kiro_agents_dir,
 )
-from kiro_crew.env import emit_env, spec_env_path, spec_path_key
+from kiro_crew.env import (
+    MCP_PATH_HINT,
+    dedup_path,
+    describe_search_path,
+    emit_env,
+    mcp_search_path,
+    spec_path_key,
+)
 from kiro_crew.mcp_cleanup import purge_deleted_proxy_from_config
 from kiro_crew.mcp_provenance import without_marker
 from kiro_crew.mcp_utils import kiro_oauth_wire_entry, mcp_server_alias
@@ -75,6 +87,7 @@ from kiro_crew.sel import (  # circular import: sel imports config which imports
     SecurityEvent,
     sel,
 )
+from kiro_crew.validation import _AGENT_NAME_RE
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +99,16 @@ def _atomic_json_write(path: Path, data: dict) -> None:
     (truncate-then-write) can deliver empty or partial JSON, crashing the
     ACP process with exit code 1.  rename() is atomic on Linux when source
     and destination are on the same filesystem.
+
+    The rename goes through ``replace_with_retry`` because atomicity is not the
+    only way that step fails. On Windows ``os.replace`` raises
+    ``PermissionError`` while ANY other handle is open on either path, and a
+    just-written temp file is exactly what an indexer or AV scanner opens —
+    so a correct atomic write can still lose its payload for reasons unrelated
+    to this caller. Here that surfaces as a failed spawn, since these are the
+    configs kiro-cli reads. The helper is Windows-only and never sleeps on the
+    event loop; ``ensure_agent_materialized`` reaches this from
+    ``asyncio.to_thread``, so the retry applies on the path that matters.
 
     Uses mkstemp for a unique temp file per call so concurrent writers
     to the same path don't clobber each other's temp files.
@@ -100,7 +123,7 @@ def _atomic_json_write(path: Path, data: dict) -> None:
             platform_compat.fchmod_safe(f.fileno(), mode)
             json.dump(data, f, indent=2)
             f.write("\n")
-        os.replace(tmp_name, path)
+        replace_with_retry(tmp_name, path)
     except BaseException:
         try:
             os.unlink(tmp_name)
@@ -328,7 +351,13 @@ def _bin_is_usable(path: Path) -> bool:
     except OSError:
         return False
     if not head.startswith(b"#!"):
-        return True  # compiled launcher (pip's Windows .exe, a frozen binary)
+        # Compiled launcher (pip's Windows .exe, a frozen binary) or a Windows
+        # batch shim (`bin\kirocrew.cmd` starts with `@`). The shim DOES name
+        # its interpreter (`"%~dp0..\python.exe"`), but we choose not to parse
+        # the batch body here; the consumer that spawns it
+        # (`_kirocrew_mcp_invocation`) resolves and validates that sibling
+        # interpreter itself, mirroring website/electron/main.js.
+        return True
     text = head.decode("utf-8", errors="replace")
 
     shebang = text.splitlines()[0][2:].strip()
@@ -397,8 +426,23 @@ def _kirocrew_bin_subpath(root: Path) -> Path:
     on Windows finds nothing, which silently drops the built-in
     ``kirocrew-cron`` / ``kirocrew-core`` MCP servers (``command not found:
     .../bin/kirocrew``). Branch on the platform so both layouts resolve.
+
+    On Windows a relocatable ``bin\\kirocrew.cmd`` shim is preferred over the
+    pip-generated ``Scripts\\kirocrew.exe`` when it exists. The desktop bundle
+    (``packaging/build-desktop.sh``) ships BOTH: pip drops a console-script
+    ``.exe`` in ``Scripts\\``, but distlib embeds the ABSOLUTE interpreter path
+    of the machine that built it, so inside a shipped bundle that ``.exe``
+    points at a build-agent path that does not exist on the user's machine.
+    The ``.cmd`` shim resolves the interpreter via ``%~dp0`` and is the only
+    relocatable launcher of the two. The Electron resolver
+    (``website/electron/find-bin.js``) ranks them the same way — keep the two
+    in sync. Plain pip installs ship no ``bin\\kirocrew.cmd``, so they keep
+    resolving ``Scripts\\kirocrew.exe`` via the fallback.
     """
     if platform_compat.IS_WINDOWS:
+        cmd_shim = root / "bin" / "kirocrew.cmd"
+        if cmd_shim.is_file():
+            return cmd_shim
         return root / "Scripts" / "kirocrew.exe"
     return root / "bin" / "kirocrew"
 
@@ -408,16 +452,19 @@ def _resolve_kirocrew_bin() -> str:
 
     Resolution order (first existing + executable wins):
 
-    0. Frozen/PyInstaller app (the shipped desktop app): ``sys.executable``
-       *is* the kirocrew CLI — e.g. ``.../kirocrew-backend`` — which accepts
-       the ``mcp-core`` / ``mcp-cron`` subcommands. The bundle has no
-       ``bin/kirocrew`` and nothing named ``kirocrew`` on PATH, so this is the
-       only reliable handle; without it kirocrew-core/kirocrew-cron are dropped.
-    1. Same install as the current process: walk up from ``kiro_crew.__file__``
-       looking for a ``bin/kirocrew`` sibling. Covers venv-based installs and
-       source-tree dev trees.
-    2. ``shutil.which('kirocrew')`` — respects PATH order.
-    3. Bare ``"kirocrew"`` — last resort, may fail but surfaces the problem
+    1. A sibling ``.venv`` entrypoint, for a source-tree install (an editable
+       install next to its own venv, e.g. ``project/src/kiro_crew`` plus
+       ``project/.venv``). Bounded by the first ``pyvenv.cfg`` walking up, so a
+       pip-into-venv install falls through to step 2 instead.
+    2. Same install as the current process: walk up from ``kiro_crew.__file__``
+       looking for a sibling console script (see
+       :func:`_kirocrew_bin_subpath` for the per-OS layout). Covers venv-based
+       installs, pip installs, source-tree dev trees, and the desktop app —
+       whose bundled interpreter is a python-build-standalone tree exposing a
+       launcher at its root, reached by this walk from the bundle's
+       ``site-packages``.
+    3. ``shutil.which('kirocrew')`` — respects PATH order.
+    4. Bare ``"kirocrew"`` — last resort, may fail but surfaces the problem
        instead of caching a known-bad absolute path.
 
     Every candidate is validated with ``is_file()`` and ``os.access(X_OK)``
@@ -434,23 +481,11 @@ def _resolve_kirocrew_bin() -> str:
         # the shared predicate, so the two cannot drift apart.
         return bool(sp) and _launcher_works(Path(sp))
 
-    # Frozen/PyInstaller app (shipped desktop app): ``sys.executable`` is the
-    # bundled ``kirocrew-backend`` binary, which *is* the kirocrew CLI and
-    # accepts the ``mcp-core`` / ``mcp-cron`` subcommands. The bundle ships no
-    # ``bin/kirocrew`` and nothing named ``kirocrew`` on PATH, so this is the
-    # only reliable handle — without it kirocrew-core / kirocrew-cron (and
-    # therefore spawn_run / cron_add / learn_add …) get dropped.
-    if getattr(sys, "frozen", False):
-        exe = sys.executable
-        if _usable(exe):
-            _KIROCREW_BIN = exe
-            return _KIROCREW_BIN
-
-    # 0. Prefer the venv entrypoint for source-tree installs (editable
+    # 1. Prefer the venv entrypoint for source-tree installs (editable
     #    install with a sibling .venv directory, e.g. project/src/kiro_crew
     #    + project/.venv/bin/kirocrew).
     #    NOTE: For pip-into-venv installs where pkg_dir is inside .venv/,
-    #    the pyvenv.cfg guard below breaks early and step 1 handles it.
+    #    the pyvenv.cfg guard below breaks early and step 2 handles it.
     try:
         # Circular import: kiro_crew.agent is loaded during kiro_crew
         # package initialization, so importing kiro_crew at module level
@@ -469,7 +504,7 @@ def _resolve_kirocrew_bin() -> str:
     except Exception:
         logger.debug("kirocrew venv bin check failed", exc_info=True)
 
-    # 1. Walk up from the running package to find bin/kirocrew
+    # 2. Walk up from the running package to find the console script
     try:
         import kiro_crew as _mc  # noqa: PLC0415  circular import
 
@@ -484,13 +519,13 @@ def _resolve_kirocrew_bin() -> str:
     except Exception:
         logger.debug("kirocrew bin walk failed", exc_info=True)
 
-    # 2. PATH lookup (also validated)
+    # 3. PATH lookup (also validated)
     found = shutil.which("kirocrew")
     if found and _usable(found):
         _KIROCREW_BIN = found
         return _KIROCREW_BIN
 
-    # 3. Last resort — don't cache, so a future call can retry
+    # 4. Last resort — don't cache, so a future call can retry
     logger.warning(
         "Could not resolve kirocrew binary to an existing file; "
         "falling back to bare 'kirocrew' (MCP probes may fail)"
@@ -586,9 +621,36 @@ def _kirocrew_mcp_invocation(subcommand: str) -> tuple[str, list[str]]:
     ``sys.executable`` is the absolute path of the running interpreter, so it
     needs no PATH entry and ignores any broken launcher. ``python -m
     kiro_crew`` dispatches the same CLI as the ``kirocrew`` console script.
+
+    A resolved ``bin\\kirocrew.cmd`` (the Windows bundle's relocatable shim,
+    see :func:`_kirocrew_bin_subpath`) is unwrapped to the sibling
+    interpreter — ``<root>\\python.exe -P -s -m kiro_crew <sub>`` — instead of
+    being emitted verbatim. This mirrors ``website/electron/main.js``, which
+    refuses to spawn the shim it resolved (Node's ``spawn()`` rejects
+    ``.cmd``/``.bat`` without ``shell:true``, CVE-2024-27980 hardening) and
+    substitutes exactly this invocation. Whether kiro-cli's spawner handles a
+    batch file is its own implementation detail; emitting the interpreter
+    directly removes the question — the shim exists for humans and find-bin
+    identity, the process tree runs ``python.exe``. When the sibling
+    interpreter is missing (corrupted bundle), fall back to
+    ``sys.executable``, which inside the bundle IS that interpreter.
     """
     bin_path = _resolve_kirocrew_bin()
     if bin_path == "kirocrew":  # unresolved sentinel from _resolve_kirocrew_bin
+        return sys.executable, ["-m", "kiro_crew", subcommand]
+    if bin_path.endswith(".cmd"):
+        interpreter = Path(bin_path).parent.parent / "python.exe"
+        if _interpreter_runnable(interpreter):
+            # ``-P`` (safe path, 3.11+) keeps the spawn CWD off ``sys.path``:
+            # kiro-cli spawns managed servers with the user's project as CWD,
+            # so with ``-m`` alone a cloned repo carrying a ``kiro_crew/``
+            # package would shadow the real one and run unconfined. Safe to
+            # pin here because this interpreter is always the bundle's own
+            # python-build-standalone 3.12 (packaging/build-desktop.sh); the
+            # generic ``sys.executable`` fallbacks below and above stay
+            # ``-P``-free because the project still supports Python 3.10,
+            # which lacks the flag.
+            return str(interpreter), ["-P", "-s", "-m", "kiro_crew", subcommand]
         return sys.executable, ["-m", "kiro_crew", subcommand]
     return bin_path, [subcommand]
 
@@ -601,10 +663,31 @@ def _computer_use_spec_gate() -> bool:
     decide whether it runs at all, because they execute inside the process the
     spec already caused kiro-cli to spawn. So a disabled feature still cost a
     full backend process — ~109 MB, per chat process including every
-    ``spawn_run`` subagent — and on Linux/Windows it cost that for a capability
-    with no driver at all (see ``backend.select_default_backend``: macOS is the
-    only platform with one). This gate is the same decision moved to the only
-    place that can act on it: spec emission.
+    ``spawn_run`` subagent — and on a platform with no driver it cost that for a
+    capability that could not work. This gate is the same decision moved to the
+    only place that can act on it: spec emission.
+
+    Two conditions, and the platform one ASKS THE BACKEND rather than naming an
+    OS. The driver's own ``status().supported`` is the same seam the Settings panel
+    reads, so a platform gaining a driver needs no edit here — which is exactly the
+    bug this replaced: a hardcoded ``IS_MACOS`` kept the server out of the spec on
+    Windows after the Windows driver shipped, so the tools were advertised in
+    ``tools`` while no server was ever spawned and the model was told they did not
+    exist.
+
+    **Neither condition loads a native library**, which matters because this gate runs
+    on the agent-config rebuild path: ``is_enabled()`` is one small JSON read and
+    ``platform_could_be_supported()`` reads only ``platform_compat`` flags, where
+    reaching a driver's ``status()`` imports the platform driver and five ``WinDLL``s
+    (measured 31ms and 32 modules on Windows) to answer a question the platform flags
+    already settle. The keystone is tested first: both must hold, both fail closed, and
+    it is the cheaper of the two.
+
+    That makes the support half OPTIMISTIC — it says a driver EXISTS for this OS, not
+    that it works on this host. Correct here: this gate's job is to avoid PAYING for a
+    backend process on a platform with no driver at all, and a driver that exists but
+    will not load is caught by the shim's own in-process checks, which run inside the
+    process that would otherwise have done the work.
 
     Both in-process checks stay as defence in depth. They still cover the case
     this gate structurally cannot — the keystone flipping OFF mid-session, after
@@ -615,19 +698,21 @@ def _computer_use_spec_gate() -> bool:
     gate hands out the operator's whole desktop, so an unreadable ceiling must
     never be read generously.
     """
-    if not platform_compat.IS_MACOS:
-        return False
     try:
         # Function-local: ``enable_state`` reaches ``config.loader`` at module
         # scope, and agent.py imports that loader function-locally everywhere
         # else for exactly that reason — a module-scope import here would close
         # an import cycle through the config plane.
+        from kiro_crew.computer_use import backend as cu_backend
         from kiro_crew.computer_use import enable_state
 
-        return enable_state.is_enabled()
+        if not enable_state.is_enabled():
+            return False
+        # The NON-LOADING predicate, not ``status()``: see the docstring above.
+        return cu_backend.platform_could_be_supported()
     except Exception:
         logger.debug(
-            "computer-use keystone unreadable; omitting it from the agent spec",
+            "computer-use support or keystone unreadable; omitting it from the agent spec",
             exc_info=True,
         )
         return False
@@ -676,8 +761,9 @@ _MANAGED_MCP_SERVERS: dict[str, dict] = {
     "kirocrew-cron": {"invocation_fn": lambda: _kirocrew_mcp_invocation("mcp-cron")},
     "kirocrew-core": {"invocation_fn": lambda: _kirocrew_mcp_invocation("mcp-core")},
     # Computer use (native desktop GUI automation).  ``spec_gate`` keeps the
-    # entry out of the emitted spec unless this is macOS AND the keystone primary
-    # enable is on, so kiro-cli never spawns the backend for a feature that is
+    # entry out of the emitted spec unless the platform HAS a supported driver
+    # AND the keystone primary enable is on, so kiro-cli never spawns the
+    # backend for a feature that is
     # off or unsupported (see _computer_use_spec_gate).  The shim's own empty
     # ``tools/list`` while disabled is retained as defence in depth.
     #
@@ -917,7 +1003,7 @@ def run_first_run_setup() -> None:
     """Deliver the install-time steps the desktop app needs without a terminal.
 
     The Electron app only runs ``kirocrew gateway`` — never ``kirocrew
-    setup`` — yet two concerns aren't covered by the gateway's agent-config
+    setup`` — yet several concerns aren't covered by the gateway's agent-config
     rebuild. This is invoked from gateway startup to close that gap:
 
     * **PATH shim** — ``ensure_kirocrew_on_path()`` is idempotent and only
@@ -925,6 +1011,10 @@ def run_first_run_setup() -> None:
       WITHOUT ``claim_existing`` for exactly that reason: running unattended on
       every start, it must fill an empty or broken slot only, never take the
       command away from another install that still works.
+    * **Default-on builtin backfill** — ``defaultEnabled`` is applied only on an
+      app's FIRST registration, so a builtin promoted to default-on later never
+      reaches installs that already registered it. Runs ONCE, guarded by its own
+      marker file, because re-running it would override a user's own disable.
     * **Stale predecessor MCP purge** — ``clean_stale_managed_mcp()`` mutates
       the user's *global* ``~/.kiro/settings/mcp.json``, so it runs ONCE,
       guarded by a marker file, to honor the "KiroCrew owns only the agent
@@ -952,7 +1042,25 @@ def run_first_run_setup() -> None:
     except Exception:
         logger.warning("First-run: admission policy seed failed", exc_info=True)
 
-    # 3. Stale managed-MCP purge — one-time, marker-guarded.
+    # 3. Default-on builtin backfill — one-shot per app, self-recorded on the
+    #    app's own installed.json (no marker file: the flag and the state it
+    #    guards must land in one atomic write). Placed BEFORE the stale-MCP early
+    #    return for the same reason step 2 is, and here the reason is the whole
+    #    point: an EXISTING install already holds the stale-MCP marker, and an
+    #    existing install is the ONLY kind this step has anything to do (a fresh
+    #    one registers these apps enabled and already flagged).
+    try:
+        from kiro_crew.apps.manager import (  # noqa: PLC0415
+            backfill_default_on_builtins,
+        )
+
+        flipped = backfill_default_on_builtins()
+        if flipped:
+            logger.info("First-run: enabled default-on builtin(s): %s", flipped)
+    except Exception:
+        logger.warning("First-run: default-on builtin backfill failed", exc_info=True)
+
+    # 4. Stale managed-MCP purge — one-time, marker-guarded.
     stale_marker = _stale_mcp_purge_marker()
     if stale_marker.exists():
         return
@@ -1212,7 +1320,14 @@ def _sel_hook_rejected(event: str, command: str, reason: str) -> None:
                 source="cli",
                 operation="kiro_hooks_rejected",
                 outcome="rejected",
-                resources=redact(f"event={event} command={command[:200]}"),
+                # redact-then-truncate on the interpolated value, through the
+                # same context-aware shim as the outer call: slicing ``command``
+                # raw could cut a credential at the boundary, and slicing after
+                # baseline-only redaction would still cut a companion-only token
+                # before the companion regexes see it. Context redaction runs
+                # over the FULL command first, so no redactor ever sees a
+                # boundary-cut fragment.
+                resources=redact(f"event={event} command={redact(command)[:200]}"),
                 error=reason,
             )
         )
@@ -1924,9 +2039,7 @@ def build_agent_config(*, gated_off: "frozenset[str] | None" = None) -> dict:
     return config
 
 
-def _refresh_dynamic_fields(
-    config: dict, *, gated_off: "frozenset[str] | None" = None
-) -> None:
+def _refresh_dynamic_fields(config: dict, *, gated_off: "frozenset[str] | None" = None) -> None:
     """Update security-critical and dynamic fields in an existing config.
 
     Called when ``kirocrew.json`` already exists so user customizations are
@@ -2181,7 +2294,7 @@ def _load_existing_config(
     """
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError):
+    except (OSError, ValueError):
         config = None
     if not isinstance(config, dict):
         return build_agent_config(gated_off=gated_off), True
@@ -2508,7 +2621,7 @@ def migrate_agent_specs() -> int:
     for spec_path in sorted(kiro_agents_dir_path().glob("*.json")):
         try:
             data = json.loads(spec_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError):
+        except (OSError, ValueError):
             continue
         if not isinstance(data, dict):
             continue
@@ -2524,6 +2637,204 @@ def migrate_agent_specs() -> int:
     if cleaned:
         logger.info("Cleaned %d kiro agent spec(s) of KiroCrew bookkeeping keys", cleaned)
     return cleaned
+
+
+def clear_model_pin(config: MutableMapping[str, object], name: str) -> None:
+    """Drop *config*'s ``model`` pin and resume tracking the shipped default.
+
+    The in-place half of "return this agent to the default model", shared by
+    every caller that offers it, so the dashboard's Agent Templates editor and
+    the CLI cannot drift on what clearing a model means (the same reason
+    :func:`agent_state.lift_and_strip_bookkeeping` is shared by four writers).
+    The caller persists *config* itself.
+
+    Deliberately the ONLY way a spec's ``model`` becomes managed after install:
+    ownership cannot be inferred from a spec's value, because a model an older
+    build's propagation wrote and one the user typed in by hand are identical on
+    disk. So this is driven by an explicit user action -- clearing the model in
+    the editor, or ``kirocrew agent reset-model`` -- and never by a heuristic
+    running behind the user's back on refresh.
+
+    Ordering is benign in both directions: if the sidecar write lands and the
+    caller's spec write does not, the next refresh resolves the still-pinned
+    spec to the shipped default, which is what the user asked for; if the spec
+    write lands and the sidecar write does not, the pin is gone and the resolver
+    falls through to the global.
+    """
+    config.pop("model", None)
+    agent_state.set_model_managed(name, True)
+
+
+def _read_spec_capped(path: Path) -> dict | None:
+    """Parse an agent spec through the hardened, SIZE-CAPPED read gate.
+
+    ``agent_discovery._read_agent_spec`` is what that module documents as the one
+    reader for both agent scopes: it reads via ``hooks.safe_read_file_bytes``, so
+    a multi-gigabyte "agent config" in a user-writable, tool-shared directory is
+    refused at the cap instead of being slurped into memory, and it also rejects
+    non-UTF-8 bytes, AppleDouble sidecars and JSON that is not an object.
+
+    A thin wrapper rather than a direct call at each site, so the reason the
+    capped reader is used lives in one place.
+    """
+    return _read_agent_spec(path)
+
+
+def _spec_path_is_safe(path: Path, agents_dir: Path) -> bool:
+    """True when *path* is a real file inside *agents_dir*, safe to read and rewrite.
+
+    A spec is read and then written back, so a SYMLINK is refused rather than
+    followed. Following one would read the target and write a modified copy into
+    the agents directory, which launders the contents of a file the reader may
+    not otherwise be allowed to open -- a governance-fenced path, for instance --
+    into a location that is freely readable. (The rewrite itself does not corrupt
+    the target: ``_atomic_json_write`` goes through ``os.replace``, which swaps
+    the link rather than writing through it. The copy-out is the problem.)
+
+    Also refuses a resolved path that leaves the agents directory, and any
+    sensitive path, which is the same fence this module already applies before
+    touching a resolved path elsewhere.
+    """
+    try:
+        if path.is_symlink():
+            return False
+        resolved = path.resolve()
+        if resolved.parent != agents_dir.resolve():
+            return False
+        if is_sensitive_path(str(resolved)):
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def agent_spec_path(name: str) -> Path | None:
+    """Return the user-level kiro spec file for *name*, or ``None`` if absent.
+
+    Prefers ``<agents dir>/<name>.json`` and falls back to a scan for a spec
+    whose ``name`` field matches, mirroring how the dashboard's per-agent
+    handler resolves an agent to a file (a spec's filename and its ``name`` are
+    not required to agree).
+
+    *name* is validated against the shared agent-name grammar BEFORE it reaches
+    the path join, so a caller passing a traversal (``../../something``) gets
+    ``None`` rather than a path outside the agents directory. The check lives
+    here, at the resolver, so every caller inherits it instead of each one
+    remembering: this function returns a path that :func:`reset_agent_model`
+    then WRITES, and the CLI takes the name from a user-supplied ``--agent``.
+    A symlinked or otherwise unsafe candidate is refused for the same reason --
+    see :func:`_spec_path_is_safe`.
+
+    A DECLARED ``name`` wins over a matching filename, which is the order the
+    other two resolvers already use (``_resolve_named_agent_model`` and the
+    dashboard's per-agent handler both test ``data["name"] == agent`` before the
+    stem). Preferring the filename would let ``<name>.json`` that declares a
+    DIFFERENT agent be selected, and since the caller then writes to it, that
+    clears the wrong agent's pin while the requested one stays pinned. The
+    filename is accepted only when no spec declares this name -- see below.
+
+    Raises ``ValueError`` when TWO safe specs declare the same name. The runtime
+    iterates the directory unordered, so which of them is live is undefined, and
+    a writer cannot pick without risking clearing the pin nothing is reading.
+    """
+    if not _AGENT_NAME_RE.match(name or ""):
+        return None
+    agents_dir = kiro_agents_dir_path()
+    if not agents_dir.is_dir():
+        return None
+
+    direct = agents_dir / f"{name}.json"
+    declared_matches: list[Path] = []
+    fallback: Path | None = None
+    for spec_path in sorted(agents_dir.glob("*.json")):
+        if not _spec_path_is_safe(spec_path, agents_dir):
+            continue
+        try:
+            data = _read_spec_capped(spec_path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        declared = data.get("name")
+        if declared == name:
+            declared_matches.append(spec_path)
+        elif spec_path == direct:
+            # Right filename. Accepted as the fallback even when it declares a
+            # DIFFERENT name, because the runtime resolver matches on
+            # `data["name"] == agent OR path.stem == agent` -- so with nothing
+            # declaring this name, the stem match makes THIS file the live spec,
+            # and refusing it would leave a live pin unresettable, which is the
+            # bug this change exists to fix. Only used when no declared match is
+            # found, and a declared match alongside it is the ambiguity the
+            # caller refuses rather than resolves.
+            fallback = spec_path
+    if len(declared_matches) > 1:
+        # Paths are repr'd: a filename in this user-writable, tool-shared
+        # directory is untrusted input, and this message is printed to a terminal.
+        raise ValueError(
+            f"{len(declared_matches)} specs declare the name {name!r}: "
+            f"{', '.join(repr(str(p)) for p in declared_matches)}. The runtime iterates the "
+            f"directory unordered, so which one is live is undefined -- remove or rename "
+            f"one before resetting."
+        )
+    if declared_matches:
+        return declared_matches[0]
+    return fallback
+
+
+def _conflicting_spec_for(name: str, chosen: Path, agents_dir: Path) -> Path | None:
+    """Return a DIFFERENT safe spec whose FILENAME also claims *name*.
+
+    The runtime resolver (``KiroCrewConfig._resolve_named_agent_model``) accepts
+    EITHER a declared-name match or a filename match -- ``data["name"] == agent
+    or path.stem == agent`` -- and iterates ``glob("*.json")``, which is
+    unordered. So when ``<name>.json`` declares a different agent AND another
+    file declares *name*, which of the two the runtime actually uses is
+    UNDEFINED: it is whichever the filesystem yields first.
+
+    A reset cannot pick correctly in that state. Clearing either one can leave
+    the live pin in place and strip the model from a spec nothing is reading, so
+    the caller refuses instead of guessing.
+    """
+    direct = agents_dir / f"{name}.json"
+    if direct == chosen or not direct.is_file():
+        return None
+    if not _spec_path_is_safe(direct, agents_dir):
+        return None
+    return direct
+
+
+def reset_agent_model(name: str) -> tuple[Path, str]:
+    """Clear *name*'s spec model pin on disk; return (spec path, previous model).
+
+    The explicit, narrow counterpart to ``kirocrew setup --clean``, which also
+    resumes default-model tracking but regenerates the whole spec and discards
+    every user customization with it. Raises ``FileNotFoundError`` when the
+    agent has no user-level spec.
+    """
+    spec_path = agent_spec_path(name)
+    if spec_path is None:
+        raise FileNotFoundError(f"no kiro agent spec for {name!r} in {kiro_agents_dir_path()}")
+    conflict = _conflicting_spec_for(name, spec_path, kiro_agents_dir_path())
+    if conflict is not None:
+        raise ValueError(
+            f"two specs claim {name!r}: {str(spec_path)!r} declares it, and {str(conflict)!r} "
+            f"carries the filename. The runtime accepts either, in unordered directory order, "
+            f"so which one is live is undefined -- rename or remove one before resetting."
+        )
+    try:
+        data = _read_spec_capped(spec_path)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(f"could not read agent spec {spec_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise FileNotFoundError(f"agent spec {spec_path} is not readable as a JSON object")
+    previous = data.get("model") or ""
+    clear_model_pin(data, name)
+    # Same strip every spec writer runs: kiro-cli validates with
+    # deny_unknown_fields and drops the whole agent on an unknown key.
+    agent_state.lift_and_strip_bookkeeping(data, name)
+    _atomic_json_write(spec_path, data)
+    return spec_path, str(previous)
 
 
 def _decline_shared_agent_home(*, audit: bool = True) -> Path | None:
@@ -2561,8 +2872,12 @@ def _decline_shared_agent_home(*, audit: bool = True) -> Path | None:
     * A globally exported ``KIRO_HOME`` moves the shared directory, so comparing
       against a hard-coded default reads "not the shared one" and waves the write
       straight through. The comparison is therefore against what the AMBIENT
-      environment resolves right now (``kiro_agents_dir()``), which is by
+      environment resolves right now (``ambient_agents_dir()``), which is by
       definition the directory every instance under this environment shares.
+      Deliberately the override-BLIND resolver, not ``kiro_agents_dir()``: the
+      latter follows ``config.paths._agents_dir_override``, so a redirect would
+      move both sides of this comparison together, read as "target is the shared
+      one", and refuse the write from any ephemeral checkout.
 
     A target is exempt only when it is **provably private**: either a caller
     redirected the write somewhere the ambient environment would never produce (a
@@ -2579,7 +2894,7 @@ def _decline_shared_agent_home(*, audit: bool = True) -> Path | None:
     (``KIROCREW_HOME=$HOME`` is enough).
     """
     target = kiro_agents_dir_path().resolve()
-    if target != kiro_agents_dir().resolve():
+    if target != ambient_agents_dir().resolve():
         # A caller pointed the write somewhere of its own choosing; nothing is
         # shared with the ambient install, so there is nothing to protect.
         return None
@@ -2603,7 +2918,52 @@ def _decline_shared_agent_home(*, audit: bool = True) -> Path | None:
     # home and then found no agents). A pod needs no arm here: ``build_pod_env``
     # gives it its own ``KIRO_HOME``, so its target is its own dedicated directory
     # and the private-target exemption above already lets it through.
-    ephemeral = _in_linked_git_worktree(Path(__file__).resolve())
+    #
+    # A checkout under the system temp directory is the third positive signal:
+    # like a linked worktree and a pod, its teardown is a matter of WHEN, not
+    # whether — temp trees are reaped by the OS, by CI, and by the automation
+    # that cloned them (a per-task scratch clone is created and deleted around a
+    # single job). A spec stamped from one names a launcher venv, and possibly a
+    # pinned data home, that stop existing when the tree goes; #4781 documents
+    # both live failure modes (ENOENT-dead managed servers, and empty-credential
+    # ``internal_auth_mismatch`` when the pinned home is recreated empty). This
+    # is checked on the CHECKOUT location (``__file__``), not the data home, so
+    # the offline E2E harness — which runs the REPO checkout on a temp data
+    # home — is unaffected, exactly the regression the note above records.
+    #
+    # An AppImage's runtime mount is carved back OUT of that arm. It sits under
+    # the temp root (``/tmp/.mount_<name>XXXXXX``) and the mount itself is indeed
+    # reaped on exit, but the temp signal's premise — a spec outliving the only
+    # instance that would have written it — inverts here: a DURABLE install (the
+    # ``.AppImage`` file on disk) stands behind the mount and re-runs this on
+    # every start, and because the runtime picks a NEW random mount each launch,
+    # rewriting the spec per start is the only way its managed servers ever
+    # resolve. Declining would freeze the spec on a previous launch's mount path
+    # and ENOENT every managed server — manufacturing #4781's own symptom on a
+    # shipped channel — and on a fresh install would leave no spec at all
+    # (``Mode 'kirocrew' not found``). ``_in_ephemeral_tree`` is the same
+    # AppImage-precise predicate the launcher installer uses; the temp-root rule
+    # it declines is the one being narrowed here, not adopted.
+    #
+    # The temp arm also declines only when there is something to preserve. This
+    # guard's entire remedy is "use the specs that already worked" — the log line
+    # below says exactly that — and with no spec present there are none, so
+    # declining does not protect a shared resource, it just leaves the install
+    # dead (every turn fails with ``Mode 'kirocrew' not found``). #4781's harm is
+    # specifically an OVERWRITE of a working spec, which this still refuses: the
+    # spec is present in every reported instance of it. A spec that exists but is
+    # already stale stays stale, same as under the worktree arm — repairing it is
+    # the durable install's job on its next start, and it rewrites unconditionally.
+    # Deliberately scoped to this arm: the worktree and pod arms predate this fix
+    # and their populations were chosen on their own grounds, so widening them is
+    # a separate decision, not a side effect of adding a third signal.
+    checkout = Path(__file__).resolve()
+    temp_scratch = (
+        _under_system_tmp(checkout)
+        and not _in_ephemeral_tree(checkout)
+        and (target / AGENT_FILENAME).exists()
+    )
+    ephemeral = _in_linked_git_worktree(checkout) or temp_scratch
     if not ephemeral:
         # A GRANT over the shared resource, so it is audited like the denial
         # below: every permission decision about the machine-wide agent home is
@@ -2657,6 +3017,55 @@ def _decline_shared_agent_home(*, audit: bool = True) -> Path | None:
 def _strip_ungoverned_auto_approve(servers: dict[str, Any]) -> dict[str, Any]:
     """Local alias so tests can monkeypatch one name (see governance)."""
     return dict(strip_ungoverned_auto_approve(servers))
+
+
+def _seed_kas_permissions(config: dict[str, Any]) -> None:
+    """Give the spec a KAS ``permissions`` block if it has none. Never edit one.
+
+    Two things ride on this field, and the second is the surprising one:
+
+    1. It is how the auto-approve list reaches the KAS backend at all, since
+       ``allowedTools`` is a kiro-cli-only field there.
+    2. Its mere PRESENCE is what makes KAS load this file. KAS classifies a JSON
+       agent profile carrying kiro-cli-only fields and no KAS field as written
+       for the other runtime and skips it outright — so without ``permissions``
+       the agent is not among the modes KAS advertises, and anything that asks
+       for it by name (a resumed session, notably) fails to find it.
+
+    That second point is why an empty policy is still written when nothing
+    qualifies for auto-approve: ``{"rules": []}`` says "no tool is
+    pre-approved", which is both true and enough to keep the file loadable.
+    Dropping the key instead would silently un-register the agent. (The wire
+    projection makes the opposite choice and omits the field entirely — there,
+    presence buys nothing and absence is the honest report.)
+
+    **Seed, never refresh.** Once the key exists it belongs to whoever edits the
+    file, and this function does not touch it again. The obvious alternative —
+    recognising Crew's own output by its shape and regenerating that — was
+    written first and removed: the shapes overlap (a blanket ``allow`` is exactly
+    what a user writes too), so the rule that keeps a derived policy current is
+    the same rule that silently overwrites a hand-written one, and losing a
+    user's policy is the worse failure. What it costs is staleness: a policy
+    written before ``allowedTools`` changed keeps describing the old list. That
+    is bounded, because the wire projection derives afresh from ``allowedTools``
+    on every session and outranks the file — the block on disk is what applies
+    when Crew is NOT injecting an agent.
+    """
+    if config.get("permissions") is not None:
+        return
+
+    # circular import: `kiro_crew.acp.__init__` pulls in the runtime, which reaches
+    # back into config/agent — and it is also the whole ACP stack, which this
+    # module has no business dragging onto the gateway boot path just to write one
+    # JSON field. The imported module itself depends on nothing in the package.
+    from kiro_crew.acp.kas_permissions import (  # noqa: PLC0415
+        allowed_tools_to_permissions,
+    )
+
+    derived = allowed_tools_to_permissions(
+        config.get("allowedTools"), agent_id=Path(AGENT_FILENAME).stem
+    )
+    config["permissions"] = derived if derived is not None else {"rules": []}
 
 
 def _may_auto_approve(ref: str) -> bool:
@@ -2826,7 +3235,7 @@ def _durable_tool_aliases(path: Path) -> tuple[bool, object]:
         return (False, None)
     try:
         on_disk = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return (True, None)
     return (True, on_disk.get("toolAliases") if isinstance(on_disk, dict) else None)
 
@@ -3033,37 +3442,58 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # spec from the other sources before dropping it, in priority order
     # (kirocrew > kiro-global > provider-global).  This prevents one source's
     # unresolvable command from killing a server another source can resolve.
-    def _resolve_command(cmd: str, env: dict | None) -> str | None:
-        """Resolve an MCP command to an absolute path, or None if not found.
+    def _resolve_command(cmd: str, env: dict | None) -> tuple[str | None, str]:
+        """Resolve an MCP command to an absolute path, plus the path searched.
+
+        Returns ``(resolved_or_None, search_path)``. The second element is what
+        lets the drop warning name the directories actually consulted; it is ""
+        when no PATH search happened (empty command, or an absolute command
+        accepted directly).
 
         Accepts an absolute path directly when the file exists and is
         executable — shutil.which can fail inside user-namespace sandboxes
         even when the file is fine.
 
-        Searches the server's own env.PATH first, then the same augmented
-        PATH the MCP probe uses — both via :func:`spec_env_path`, which is
-        also the value emitted into the spec, so resolution, the probe and the
-        launched child all agree. A divergence would let a server probe healthy
+        Searches the server's own env.PATH first, then the contributed MCP
+        directories, then the same augmented PATH the MCP probe uses — all via
+        :func:`mcp_search_path`, so resolution, the probe and the rewriter all
+        agree. A divergence would let a server probe healthy
         on the dashboard while being silently dropped from the generated agent
-        config ("command not found: kirocrew"). augmented_path
+        config ("command not found: kirocrew"). The value EMITTED into the spec
+        is :func:`spec_env_path` instead, which omits the contributed
+        directories: an emitted PATH is persisted and read back as an authored
+        entry, so a contributed directory written there could never be removed
+        again. augmented_path
         covers ~/.aim/mcp-servers and ~/.toolbox/bin and appends the running
         interpreter's console-scripts dir
         (venv ``Scripts\\`` on Windows, ``bin/`` on POSIX) as a last-resort
         fallback for pip-generated wrappers like ``kirocrew``.
         """
         if not cmd:
-            return None
+            return None, ""
         if os.path.isabs(cmd) and os.path.isfile(cmd) and os.access(cmd, os.X_OK):
-            return cmd
+            return cmd, ""
         # Case-insensitive PATH key: a Windows-authored spec says "Path", and
         # resolving against a DIFFERENT path than the emitted spec carries would
         # reopen the probe/session split from the other side.
         _env = env or {}
         _key = spec_path_key(_env)
         _declared = _env.get(_key, "") if _key else ""
-        return shutil.which(
-            cmd, path=spec_env_path(_declared if isinstance(_declared, str) else "")
-        )
+        _search = mcp_search_path(_declared if isinstance(_declared, str) else "")
+        # A command carrying a directory component is not PATH-searched:
+        # ``shutil.which`` returns before it reads ``path=`` when
+        # ``os.path.dirname(cmd)`` is truthy, checking exactly the one location
+        # the command names. Reporting ``_search`` for it would send the reader
+        # to audit directories that were never consulted, which is the opposite
+        # of the not-installed/installed-elsewhere distinction this path draws --
+        # so return "" as the searched path even though the lookup still runs.
+        if os.path.dirname(cmd):
+            return shutil.which(cmd, path=_search), ""
+        # The search path is returned, not recomputed by the caller: a candidate
+        # that declares its own ``env.PATH`` is searched against a DIFFERENT path
+        # than one that does not, so a caller reporting ``mcp_search_path("")``
+        # would name directories that were never searched.
+        return shutil.which(cmd, path=_search), _search
 
     valid_servers: dict[str, Any] = {}
     # The store is keyed by its own RAW name, but ``name`` below iterates the
@@ -3138,20 +3568,12 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
                 if not _candidates:
                     _base = _alias_family_base(name)
                     _held = _cfg_servers.get(_base)
-                    if (
-                        _base != name
-                        and isinstance(_held, dict)
-                        and _held.get("url") != _url
-                    ):
+                    if _base != name and isinstance(_held, dict) and _held.get("url") != _url:
                         _candidates = [
-                            c
-                            for c in _store_by_alias.get(_base, ())
-                            if c.get("url") == _url
+                            c for c in _store_by_alias.get(_base, ()) if c.get("url") == _url
                         ]
                 _store_entry = _candidates[0] if len(_candidates) == 1 else None
-            valid_servers[name] = kiro_oauth_wire_entry(
-                spec, store_entry=_store_entry, server=name
-            )
+            valid_servers[name] = kiro_oauth_wire_entry(spec, store_entry=_store_entry, server=name)
             continue
         # Build candidate specs in priority order: the merged winner first,
         # then the same server from each source as a resolution fallback.
@@ -3168,12 +3590,15 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
         resolved: str | None = None
         chosen: dict = spec
         tried: list[str] = []
+        searched: list[str] = []
         had_any_command = False
         for label, cand in candidates:
             cmd = cand.get("command", "")
             if cmd:
                 had_any_command = True
-            r = _resolve_command(cmd, cand.get("env"))
+            r, cand_search = _resolve_command(cmd, cand.get("env"))
+            if cand_search:
+                searched.append(cand_search)
             tried.append(f"{label}={cmd or '<none>'}{' -> ok' if r else ''}")
             if r:
                 resolved = r
@@ -3211,11 +3636,34 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
             # that was defined but couldn't be resolved.
             logger.warning("Dropping MCP server %r: no command", name)
         else:
-            logger.warning(
-                "Dropping MCP server %r: command not found: %s",
-                name,
-                spec.get("command", ""),
-            )
+            # The searched directories belong in the WARNING, not only at DEBUG:
+            # a default-level reader is exactly who needs to tell "installed
+            # somewhere this path does not cover" from "not installed at all".
+            # Built from the paths the candidates were ACTUALLY searched against
+            # and deduped -- a candidate declaring its own env.PATH is searched
+            # against a different path, so recomputing one here would name
+            # directories that were never consulted. The candidate list stays at
+            # DEBUG: that is about which spec won, not about why none resolved.
+            if searched:
+                logger.warning(
+                    "Dropping MCP server %r: command not found: %s — %s; %s",
+                    name,
+                    spec.get("command", ""),
+                    describe_search_path(dedup_path(os.pathsep.join(searched))),
+                    MCP_PATH_HINT,
+                )
+            else:
+                # No candidate was PATH-searched (e.g. every command carries a
+                # directory component, which shutil.which looks up directly).
+                # ``describe_search_path("")`` would render "searched no
+                # directories (empty PATH)" and blame a PATH that was never
+                # consulted, so omit the clause instead.
+                logger.warning(
+                    "Dropping MCP server %r: command not found: %s; %s",
+                    name,
+                    spec.get("command", ""),
+                    MCP_PATH_HINT,
+                )
             logger.debug("MCP %r resolution failed; tried %s", name, "; ".join(tried))
     config["mcpServers"] = valid_servers
 
@@ -3505,6 +3953,10 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
 
     def _finalize_and_write() -> None:
         servers_map = config.get("mcpServers")
+        # Runs here, at the single funnel every write path goes through, and AFTER
+        # the passes that mutate `allowedTools` (managed/shared MCP sync) — a policy
+        # seeded before them would describe a list that no longer exists.
+        _seed_kas_permissions(config)
         if isinstance(servers_map, dict):
             # LAST governance pass over the assembled server map. `autoApprove` can
             # arrive from an app manifest, a per-agent policy, a managed spec or an
@@ -3695,6 +4147,12 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     except Exception:
         logger.debug("kirocrew-heartbeat agent install failed", exc_info=True)
 
+    # Install kirocrew-conductor agent (goal decomposition + session-control dispatch)
+    try:
+        _install_conductor_agent()
+    except Exception:
+        logger.debug("kirocrew-conductor agent install failed", exc_info=True)
+
     # Bidirectional sync: ensure packages installed for one provider
     # are also available for the other (agents↔plugins, skills).
     sync_aim_packages()
@@ -3745,9 +4203,7 @@ def ensure_agent_materialized(agent: str | None) -> bool:
         rebuild_agent_config()
         return agent_file.exists()
     except Exception:
-        logger.warning(
-            "ensure_agent_materialized failed for agent %r", agent, exc_info=True
-        )
+        logger.warning("ensure_agent_materialized failed for agent %r", agent, exc_info=True)
         return False
 
 
@@ -3934,6 +4390,173 @@ def _install_research_agent() -> None:
     path = kiro_agents_dir_path() / _RESEARCH_AGENT_FILENAME
     _atomic_json_write(path, config)
     logger.info("Installed research agent config: %s", path)
+
+
+_CONDUCTOR_SYSTEM_PROMPT = """# Kiro Crew Conductor
+
+You are `kirocrew-conductor`. You own a long-horizon goal: you decompose it
+into work items, stand up one top-level session per item, patrol their state,
+and decide each next round until the goal is met or a stop condition fires.
+
+**You never do a work item's work yourself.** If a task needs a file written,
+a build run, or a fix made, it is a work item for a child session — your four
+jobs are decomposition, dispatch, verification, and the next-round decision.
+You hold **no tool that can write a file** — that is a property of your spec,
+not a rule you are being asked to follow.
+Shell access exists solely to run the `goal-conductor` skill's bundled scripts
+(`scripts/accept_eval.py` for acceptance verdicts, `scripts/ledger_entry.py`
+for the durable ledger item-entry format); acceptance is the evaluator's
+deterministic verdict, never your reading of a child session's transcript.
+
+Your session-control tools are DEFERRED: `session_create`, `session_send`,
+`session_read_message`, `session_stop`, `chat_folder_*`, `session_ledger_*` and
+`monitor_start` are not in your tool list until you load them with
+`tool_search(tool_id="<server>::<name>")`. A first direct call failing with "a
+tool with the name ... does not exist" means DEFERRED, not missing — load it and
+repeat the call. That is what `tool_search` is mounted for.
+
+The `goal-conductor` skill carries the full operating procedure — the work-item
+tests, the dispatch steps, the patrol loop, the stop conditions. Read it
+before acting on a goal. The user can message you at any time; apply goal
+changes at the round boundary, except a message that directly invalidates an
+in-flight item, which you handle immediately.
+"""
+
+
+def _install_conductor_agent() -> None:
+    """Generate and install the kirocrew-conductor agent config.
+
+    Derives from the kirocrew agent (resolved MCP invocations, security hooks)
+    but narrows to the conductor's charter: session control + core tools +
+    shell for the bundled skill scripts (acceptance evaluator + ledger entry
+    codec), and **no tool that can write a
+    file** — not ``fs_write``, and not ``code`` either, which governance classes
+    under ``filesystem.write`` because it writes files and can shell out. That
+    is what makes "never does a work item's work itself" a property of the spec
+    rather than of the prompt. The ``kirocrew-dashboard`` server is the opt-in
+    per-agent set (folder + session-control tools); this installer granting it IS
+    the explicit per-agent assignment that set requires — it is deliberately
+    absent from the default agent's spec.
+
+    ``@kirocrew-dashboard`` is NOT added to ``allowedTools``: its calls must
+    keep passing through ``hooks.on_tool_call`` where the deny floor and
+    governance ceiling apply, so every session-control call prompts. Neither is
+    ``execute_bash``, for the same reason — the evaluator run prompts too, which
+    is what actually bounds what an acceptance spec can execute.
+
+    The operating procedure ships as the ``goal-conductor`` builtin skill, NOT
+    ``conductor``: that skill name is owned by the generated delegation skill
+    (``conductor_skill.generate_conductor_skill``), and two existing code paths
+    delete ``<skills>/conductor/SKILL.md`` when ``agent.conductor_skill`` is
+    false — the default. Sharing the name would let ``kirocrew setup`` erase the
+    packaged skill on a stock install, and quarantine the user's delegation
+    skill when the flag is on.
+    """
+    config = build_agent_config()
+    config["name"] = "kirocrew-conductor"
+    config["description"] = (
+        "Owns a long-horizon goal: decomposes it into work items, stands up "
+        "a top-level session per item, patrols their state, and decides each "
+        "next round. Never does the work itself."
+    )
+    config["prompt"] = _CONDUCTOR_SYSTEM_PROMPT
+    config["tools"] = [
+        "execute_bash",
+        "fs_read",
+        # ``web_fetch`` serves the charter's own worked example (reading an issue
+        # list during triage). Deliberately NOT mounted: ``web_search`` (nothing
+        # names it), ``grep``/``glob`` (``fs_read`` covers every read the charter
+        # describes), and above all ``code`` — governance classes it under
+        # ``filesystem.write`` because it "writes files AND can shell out", so
+        # mounting it would make this spec's whole no-write property false.
+        # An unused grant is surface the charter cannot account for.
+        "web_fetch",
+        "session",
+        "report",
+        # Load-bearing, not decoration: with MCP Tool Search active the
+        # session-control specs are deferred, so the conductor cannot reach
+        # ``session_create`` / ``chat_folder_*`` / ``monitor_start`` at all until
+        # it loads them by id. Named in the prompt for that reason.
+        "tool_search",
+        "@kirocrew-core",
+        "@kirocrew-dashboard",
+    ]
+    # ``allowedTools`` is the ONE path that never reaches the PreToolUse gate, so
+    # every grant is filtered through the governance ceiling first — the same
+    # predicate ``rebuild_agent_config`` applies to the primary spec's assembled
+    # list, and the entry point ``may_skip_gate_now`` exists precisely so a new
+    # writer cannot re-open the bypass by restating a literal. A governed ref
+    # stays MOUNTED (it is still in ``tools``); it just prompts, and the gate
+    # then applies the ceiling's per-tool rule with the real arguments.
+    granted: list[str] = []
+    withheld: list[str] = []
+    for ref in ("session", "report", "@kirocrew-core"):
+        (granted if _may_auto_approve(ref) else withheld).append(ref)
+    config["allowedTools"] = granted
+    if withheld:
+        # Withholding a grant is a permission DECISION, and every other writer of
+        # an ``allowedTools`` list emits this same event for it — see
+        # ``strip_ungoverned_auto_approve``, whose comment names a silent pop as
+        # the one withhold path with no audit trail. Filtering silently here would
+        # make this installer exactly that path: on a governed host a ref loses its
+        # grant and the operator has no record of why the conductor now prompts.
+        # Same operation name so it lands in one feed, and the audit must never
+        # break the install.
+        try:
+            sel().log_api_access(
+                caller="system",
+                operation="mcp_auto_approve_withheld",
+                outcome="ok",
+                source="_install_conductor_agent",
+                resources=(
+                    f"{', '.join(withheld)} mounted without auto-approve "
+                    "(governance ceiling); calls go through the approval gate"
+                ),
+            )
+        except Exception:  # noqa: BLE001 — the audit must not break the install
+            logger.debug("SEL audit unavailable for withheld auto-approve", exc_info=True)
+    mcp = config.get("mcpServers", {}) or {}
+    core_entry = mcp.get("kirocrew-core")
+    narrowed: dict = {}
+    if core_entry:
+        narrowed["kirocrew-core"] = core_entry
+    dash_cmd, dash_args = _kirocrew_mcp_invocation("mcp-dashboard")
+    dash_entry: dict[str, Any] = {"command": dash_cmd, "args": dash_args}
+    # Same managed-server metadata `build_agent_config` stamps on every entry it
+    # emits, and the reason this entry needs it spelled out is that it is the one
+    # server hand-built here rather than inherited: without `"type": "registry"`
+    # a registry-mode client silently DROPS the entry, so the conductor's
+    # session-control tools never launch and its whole dispatch/patrol purpose is
+    # dead with no local error; without the `KIROCREW_HOME` pin the shim reads the
+    # DEFAULT data home while the gateway runs under an override, so session
+    # control would act on a different session store than the one it reports on.
+    # Both helpers return empty on a default install, so the emitted spec is
+    # unchanged there.
+    if _mcp_registry_mode():
+        dash_entry["type"] = _MCP_REGISTRY_TYPE
+    dash_env = _managed_mcp_env()
+    if dash_env:
+        dash_entry["env"] = dash_env
+    narrowed["kirocrew-dashboard"] = dash_entry
+    config["mcpServers"] = narrowed
+    # Derive the KAS policy from the FILTERED grant list instead of restating it
+    # as a literal: the rules come out byte-identical, a later edit to
+    # ``allowedTools`` carries through, and a ceiling that strips a grant strips
+    # its KAS rule with it (a hand-written ``kirocrew-core/*`` allow would have
+    # survived the filter on the KAS backend). ``{"rules": []}`` when nothing
+    # qualifies — the key's mere PRESENCE is what makes KAS load the spec at all.
+    from kiro_crew.acp.kas_permissions import (  # noqa: PLC0415 - circular import
+        allowed_tools_to_permissions,
+    )
+
+    derived = allowed_tools_to_permissions(
+        config["allowedTools"], agent_id=Path(_CONDUCTOR_AGENT_FILENAME).stem
+    )
+    config["permissions"] = derived if derived is not None else {"rules": []}
+    kiro_agents_dir_path().mkdir(parents=True, exist_ok=True)
+    path = kiro_agents_dir_path() / _CONDUCTOR_AGENT_FILENAME
+    _atomic_json_write(path, config)
+    logger.info("Installed conductor agent config: %s", path)
 
 
 _HEARTBEAT_SYSTEM_PROMPT = """# KiroCrew Heartbeat Worker

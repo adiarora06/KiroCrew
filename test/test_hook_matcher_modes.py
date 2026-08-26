@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -176,17 +177,37 @@ class TestSkillsOnlyFire:
         assert len(results) == 0
 
     @pytest.mark.asyncio
-    async def test_skills_with_command_runs_command(self, store: ScriptHookStore):
-        """A hook with BOTH skills and command should use the command path, not skills-only."""
-        store.create(
-            {
-                "name": "mixed-hook",
-                "event": HOOK_EVENT_USER_PROMPT_SUBMIT,
-                "command": "echo extra-context",
-                "matcher": "",
-                "skills": ["skill-a"],
-            }
+    async def test_skills_with_command_runs_command(self, tmp_path: Path):
+        """fire() takes the command path (never skills-only) when a command is set.
+
+        Both write paths (create/update) now reject command+skills (issue
+        #5444) — the skills would be inert — so a mixed hook can only reach the
+        store via deserialization of a hand-edited / older ``hooks.json``. This
+        pins the defense-in-depth ``fire()`` behavior for such a persisted
+        config: the command runs, the skills are ignored, and it does NOT take
+        the skills-only shortcut.
+        """
+        # Persist a mixed hook directly (bypassing create's validation) to model
+        # a hand-edited store file, then load it fail-soft via from_dict.
+        path = tmp_path / "hooks.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "hooks": [
+                        {
+                            "id": "mixed",
+                            "name": "mixed-hook",
+                            "event": HOOK_EVENT_USER_PROMPT_SUBMIT,
+                            "command": "echo extra-context",
+                            "matcher": "",
+                            "skills": ["skill-a"],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
         )
+        store = ScriptHookStore(tmp_path)
         results = await store.fire(HOOK_EVENT_USER_PROMPT_SUBMIT, "anything")
         # When command is set, the subprocess path runs (not skills-only).
         # In sandboxed CI the command may be governance-blocked (exit -1 or 2),
@@ -225,10 +246,127 @@ def test_hook_create_requires_command_or_skills():
 
     # Valid: command only
     _validate_hook_has_action({"command": "echo hi", "skills": []})
-    # Valid: skills only
-    _validate_hook_has_action({"command": "", "skills": ["prepare-pr"]})
-    # Valid: both
-    _validate_hook_has_action({"command": "echo hi", "skills": ["prepare-pr"]})
+    # Valid: skills only (on a skills-capable event)
+    _validate_hook_has_action(
+        {"command": "", "skills": ["prepare-pr"], "event": "UserPromptSubmit"}
+    )
+    # Invalid: both command and skills (skills would be inert)
+    with pytest.raises(ValidationError, match="cannot be combined with a command"):
+        _validate_hook_has_action({"command": "echo hi", "skills": ["prepare-pr"]})
     # Invalid: neither
     with pytest.raises(ValidationError, match="either command or skills must be provided"):
         _validate_hook_has_action({"command": "", "skills": []})
+
+
+class TestRegexCaseInsensitivityFix:
+    """Verify the (?i) prepend only skips for actual inline-flag groups."""
+
+    def test_non_capturing_group_gets_case_insensitive(self):
+        """(?:...) is a non-capturing group, not a flag — (?i) must be prepended."""
+        assert _context_matches(r"(?:deploy|release)", "regex", "DEPLOY now")
+
+    def test_lookahead_gets_case_insensitive(self):
+        """(?=...) is a lookahead, not a flag — (?i) must be prepended."""
+        assert _context_matches(r"(?=deploy)deploy", "regex", "DEPLOY now")
+
+    def test_lookbehind_gets_case_insensitive(self):
+        """(?<name) is a named group — (?i) must be prepended."""
+        assert _context_matches(r"(?P<word>deploy)", "regex", "DEPLOY now")
+
+    def test_actual_flag_group_not_doubled(self):
+        """(?i) already present — must not be doubled."""
+        assert _context_matches(r"(?i)deploy", "regex", "DEPLOY now")
+
+    def test_multi_flag_group_not_doubled(self):
+        """(?im) already present — must not be doubled."""
+        assert _context_matches(r"(?im)^deploy", "regex", "DEPLOY now")
+
+    def test_flag_group_with_colon_not_doubled(self):
+        """(?i:...) already has flag — must not be doubled."""
+        assert _context_matches(r"(?i:deploy)", "regex", "DEPLOY now")
+
+    def test_bare_pattern_case_insensitive(self):
+        """A plain word pattern gets (?i) and matches case-insensitively."""
+        assert _context_matches("deploy", "regex", "DEPLOY THIS")
+
+
+class TestRegexValidationAtSave:
+    """Verify invalid regex is rejected at save time."""
+
+    def test_valid_regex_passes(self):
+        from kiro_crew.validation import _validate_hook_regex
+
+        _validate_hook_regex({"matcher": r"\bPR\b", "matcher_mode": "regex"})
+
+    def test_invalid_regex_rejected(self):
+        from kiro_crew.validation import ValidationError, _validate_hook_regex
+
+        with pytest.raises(ValidationError, match="invalid regex"):
+            _validate_hook_regex({"matcher": "[invalid", "matcher_mode": "regex"})
+
+    def test_glob_mode_skips_regex_validation(self):
+        from kiro_crew.validation import _validate_hook_regex
+
+        # An "invalid regex" in glob mode should not be rejected
+        _validate_hook_regex({"matcher": "[invalid", "matcher_mode": "glob"})
+
+    def test_empty_matcher_passes(self):
+        from kiro_crew.validation import _validate_hook_regex
+
+        _validate_hook_regex({"matcher": "", "matcher_mode": "regex"})
+
+
+class TestSkillsOnlyDeadConfigValidation:
+    """Verify skills-only hooks on tool/Stop events are rejected at save time."""
+
+    def test_skills_only_on_user_prompt_allowed(self):
+        from kiro_crew.validation import _validate_hook_has_action
+
+        _validate_hook_has_action(
+            {"command": "", "skills": ["prepare-pr"], "event": "UserPromptSubmit"}
+        )
+
+    def test_skills_only_on_agent_spawn_allowed(self):
+        from kiro_crew.validation import _validate_hook_has_action
+
+        _validate_hook_has_action(
+            {"command": "", "skills": ["prepare-pr"], "event": "AgentSpawn"}
+        )
+
+    def test_skills_only_on_pre_tool_use_rejected(self):
+        from kiro_crew.validation import ValidationError, _validate_hook_has_action
+
+        with pytest.raises(ValidationError, match="cannot fire on PreToolUse"):
+            _validate_hook_has_action(
+                {"command": "", "skills": ["prepare-pr"], "event": "PreToolUse"}
+            )
+
+    def test_skills_only_on_stop_rejected(self):
+        from kiro_crew.validation import ValidationError, _validate_hook_has_action
+
+        with pytest.raises(ValidationError, match="cannot fire on Stop"):
+            _validate_hook_has_action(
+                {"command": "", "skills": ["prepare-pr"], "event": "Stop"}
+            )
+
+    def test_skills_with_command_rejected(self):
+        """A hook with BOTH command and skills is rejected — skills would be inert."""
+        from kiro_crew.validation import ValidationError, _validate_hook_has_action
+
+        with pytest.raises(ValidationError, match="cannot be combined with a command"):
+            _validate_hook_has_action(
+                {"command": "echo hi", "skills": ["prepare-pr"], "event": "UserPromptSubmit"}
+            )
+        # Rejected on Stop too (the command+skills check fires before the event check)
+        with pytest.raises(ValidationError, match="cannot be combined with a command"):
+            _validate_hook_has_action(
+                {"command": "echo hi", "skills": ["prepare-pr"], "event": "Stop"}
+            )
+
+    def test_command_only_on_stop_allowed(self):
+        """A command-only hook is allowed on any event (no skills to strand)."""
+        from kiro_crew.validation import _validate_hook_has_action
+
+        _validate_hook_has_action(
+            {"command": "echo hi", "skills": [], "event": "Stop"}
+        )

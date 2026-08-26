@@ -87,8 +87,31 @@ def build_session_new_params(
     if claude_meta:
         params["_meta"] = {"claudeCode": {"options": {}}}
     if kas_custom_agents:
-        params["_meta"] = {"kiro": {"customAgents": kas_custom_agents}}
+        attach_kas_custom_agents(params, kas_custom_agents)
     return params
+
+
+def attach_kas_custom_agents(
+    params: dict[str, Any],
+    agents: list[dict[str, Any]] | None,
+) -> None:
+    """Put agent definitions in the ``_meta`` envelope KAS reads them from.
+
+    Shared by ``session/new`` and ``session/load`` so the envelope's shape has
+    one owner: a resumed session needs the same definitions a new one gets, and
+    two hand-built copies of the same nesting would be free to drift.
+
+    Merges into any existing ``_meta`` rather than replacing it. Today's other
+    writer is a kiro-cli-only transcript path, so in practice they never both
+    apply — but a future third writer should not be able to silently drop one.
+    """
+    if not agents:
+        return
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        params["_meta"] = meta
+    meta["kiro"] = {"customAgents": agents}
 
 
 def set_mode_params(session_id: str, agent: str) -> dict[str, Any]:
@@ -312,41 +335,136 @@ def classify_notification(msg: JsonRpcMessage) -> str:
 # per-class: the caller walks the returned events.
 
 
-def make_unified_diff(old: str, new: str, path: str, max_len: int = 6000) -> str:
-    """Generate a unified diff string from old/new text, handling empty inputs."""
+# Appended when a diff is cut at ``max_len``. Uses the unified-diff escape
+# convention ("\ ...", the same lead-in as "\ No newline at end of file"), so
+# diff renderers skip the line while consumers counting +/- rows can detect
+# that the counts understate the real change.
+DIFF_TRUNCATION_MARK = "\\ diff truncated"
+
+# Argument keys that carry the created file's content across edit-tool arg
+# shapes; checked in order, the first non-empty string wins.
+_EDIT_CONTENT_KEYS = ("fileText", "content", "text")
+
+
+def derive_edit_diff(raw_input: object) -> str:
+    """Derive a unified diff from a bare-JSON edit payload.
+
+    Covers the edit-tool arg shapes that arrive WITHOUT a diff content block:
+    a ``strReplace`` pair renders as a replace hunk; a ``create``'s content
+    renders as a whole-file addition; an ``insert`` with a line number
+    renders as an addition hunk AT that line — in all three the rendered
+    lines ARE the change, exactly. An insert/append without a line number
+    derives nothing (the hunk position would be a guess) and keeps its
+    fold-proof trace via the file_changes snapshot channel. Deriving here
+    (single, shared) rather than per-surface means every consumer of
+    ``tool_input`` — the dashboard card, a future channel renderer — sees
+    the same diff.
+    """
+    if not isinstance(raw_input, dict):
+        return ""
+    path = raw_input.get("path")
+    if not isinstance(path, str) or not path:
+        # A non-string path (numeric, dict) in malformed args must not reach
+        # difflib — a TypeError here would abort the whole dispatch mid-turn.
+        return ""
+    command = raw_input.get("command")
+    if command == "strReplace":
+        old = raw_input.get("oldStr")
+        new = raw_input.get("newStr")
+        old = old if isinstance(old, str) else ""
+        new = new if isinstance(new, str) else ""
+        if old or new:
+            return make_unified_diff(old, new, path)
+        return ""
+    if command == "create":
+        for key in _EDIT_CONTENT_KEYS:
+            value = raw_input.get(key)
+            if isinstance(value, str) and value:
+                return make_unified_diff("", value, path)
+        return ""
+    if command == "insert":
+        insert_line = raw_input.get("insertLine")
+        if not isinstance(insert_line, int) or insert_line < 0:
+            return ""
+        for key in _EDIT_CONTENT_KEYS:
+            value = raw_input.get(key)
+            if isinstance(value, str) and value:
+                lines = value.rstrip("\n").split("\n")
+                body = "\n".join(f"+{line}" for line in lines)
+                # Pure-insertion hunk: zero old lines at insert_line, the
+                # added lines starting on the following row (0-indexed
+                # insertLine -> content lands as new line insert_line+1).
+                header = f"@@ -{insert_line},0 +{insert_line + 1},{len(lines)} @@"
+                return f"--- {path}\n+++ {path}\n{header}\n{body}"
+        return ""
+    return ""
+
+
+def make_unified_diff(old: str, new: str, path: str, max_len: int = 65536) -> str:
+    """Generate a unified diff string from old/new text, handling empty inputs.
+
+    ``max_len`` bounds the live event payload; the default is sized so the
+    dashboard's full-card range (a few hundred lines) is never cut. A longer
+    diff is truncated at a LINE boundary and annotated with
+    ``DIFF_TRUNCATION_MARK`` — a bare slice can cut mid-line and render a
+    garbled half-row, and an unmarked cut silently understates +/- counts.
+    """
     old_lines = (old if old.endswith("\n") else old + "\n").splitlines(keepends=True) if old else []
     new_lines = (new if new.endswith("\n") else new + "\n").splitlines(keepends=True) if new else []
     udiff = difflib.unified_diff(old_lines, new_lines, fromfile=path, tofile=path, n=3)
-    return "".join(udiff).rstrip()[:max_len]
+    text = "".join(udiff).rstrip()
+    if len(text) <= max_len:
+        return text
+    budget = max(max_len - len(DIFF_TRUNCATION_MARK) - 1, 0)
+    cut = text.rfind("\n", 0, budget)
+    head = text[:cut] if cut > 0 else text[:budget]
+    return head + "\n" + DIFF_TRUNCATION_MARK
 
 
-def select_tool_title(title: object, raw_input: object, kind: object = None) -> str | None:
+def select_tool_title(
+    title: object,
+    raw_input: object,
+    kind: object = None,
+    *,
+    is_shell: bool | None = None,
+) -> str | None:
     """Pick the pill label, preferring a human-readable ``description`` when present.
 
     Some backends' Bash tool emits a ``description`` field alongside ``command``
     (e.g. "List KiroCrew ACP module files" rather than ``ls /workplace/...``).
-    We surface it on the pill when supplied; otherwise we fall back to the
-    SDK-provided ``title`` (the literal tool invocation). Used for both the
+    We surface it on the pill when supplied, then the literal shell command for
+    a shell tool, and only then the SDK-provided ``title``. Used for both the
     initial ``tool_call`` and the second-phase ``tool_call_update`` refinement
     so the title rule stays consistent across both events.
+
+    The command outranks ``title`` because backends disagree on what ``title``
+    holds for a shell call: some send the invocation itself, others a generic
+    kind label ("Run Command") that names no command at all. Reading the
+    command yields the same pill for the first shape and an informative one for
+    the second, and it is never the weaker choice — a genuinely human-readable
+    label arrives as ``description``, which still wins.
+
+    ``is_shell`` overrides the kind-derived classification for a caller holding
+    a RESOLVED signal. A ``tool_call_update`` may omit ``kind`` entirely, and
+    reading that absence as non-shell would put the generic title back on a
+    pill the initial ``tool_call`` had already labelled with its command.
     """
     if isinstance(raw_input, dict):
         desc = raw_input.get("description")
         if isinstance(desc, str) and desc.strip():
             return desc
+    kind_str = kind if isinstance(kind, str) else None
+    shell = is_shell_kind(kind_str) if is_shell is None else is_shell
+    # Shell kinds only, so an fs tool's operation name ("strReplace") is never
+    # mistaken for a command.
+    if shell and isinstance(raw_input, dict):
+        cmd = raw_input.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            return cmd
     # The flat title field defaults to an "unknown" sentinel when a backend
     # omits it; treat that (and blanks) as absent rather than surfacing it.
     if isinstance(title, str) and title and title != "unknown":
         return title
-    # Some backends omit the SDK title for a shell/exec tool and carry only the
-    # command in rawInput. Surface it for shell kinds only (so an fs tool's
-    # operation name is never mistaken for a command) instead of a bare kind
-    # label like "Run Command".
-    kind_str = kind if isinstance(kind, str) else None
-    if is_shell_kind(kind_str) and isinstance(raw_input, dict):
-        cmd = raw_input.get("command")
-        if isinstance(cmd, str) and cmd.strip():
-            return cmd
     return None
 
 
@@ -763,21 +881,21 @@ def _build_tool_call_event(
                     input_str = diff_str
                     found_diff = True
                 break
-    # Fallback for strReplace when no diff content block was present.
-    if not found_diff and isinstance(raw_input, dict) and raw_input.get("command") == "strReplace":
-        old = raw_input.get("oldStr") or ""
-        new = raw_input.get("newStr") or ""
-        if old or new:
-            diff_str = make_unified_diff(old, new, raw_input.get("path") or "")
-            if diff_str:
-                input_str = diff_str
+    # Fallback when no diff content block was present: derive from the edit
+    # args themselves (strReplace pair, create/insert content). Gated on the
+    # EDIT kind — "content"-shaped args exist on many non-edit tools, and a
+    # derived diff would corrupt their input display.
+    if not found_diff and (kind == "edit" or (isinstance(raw_input, dict) and raw_input.get("command") == "strReplace")):
+        diff_str = derive_edit_diff(raw_input)
+        if diff_str:
+            input_str = diff_str
     if input_str:
         input_str = _redact(input_str)
     if tool_call_id and input_str and tool_input_cache is not None:
         tool_input_cache[_ck] = input_str
     if purpose:
         purpose = _redact(purpose)
-    title = select_tool_title(title, raw_input, kind) or ""
+    title = select_tool_title(title, raw_input, kind, is_shell=is_shell) or ""
     if title:
         title = _redact(title)
     if kind:
@@ -1056,7 +1174,25 @@ def _build_tool_refinement_event(
     # and every child permission request downgrades to low fidelity.
     if raw_params_cache is not None and isinstance(raw_input, dict) and raw_input:
         raw_params_cache[_rk] = raw_input
-    title_source = select_tool_title(title, raw_input, kind)
+    # Refresh the cached shell signal only when this refinement carries a kind
+    # (kind is optional on updates); a kind-less refinement must not clobber a
+    # True cached by the initial tool_call. Mirrors AcpClient exactly. Resolved
+    # BEFORE the title so the label rule sees the real classification rather
+    # than a missing kind.
+    if shell_cache is not None:
+        if isinstance(kind, str) and kind:
+            shell_cache[_rk] = is_shell_kind(kind)
+        is_shell = shell_cache.get(_rk, False)
+    else:
+        is_shell = is_shell_kind(kind) if isinstance(kind, str) and kind else False
+    # A refinement carrying a title but no rawInput still overwrites the pill,
+    # so the command has to be recoverable from the params the initial
+    # tool_call cached — otherwise a backend that sends a generic title on both
+    # events lands that label on a pill the first event got right.
+    _title_params: object = raw_input
+    if not (isinstance(raw_input, dict) and raw_input) and raw_params_cache is not None:
+        _title_params = raw_params_cache.get(_rk)
+    title_source = select_tool_title(title, _title_params, kind, is_shell=is_shell)
     title_str = _redact(title_source) if title_source else ""
     kind_str = _redact(kind) if isinstance(kind, str) and kind else ""
     # The refinement's rawInput is the COMPLETE params object, so it carries the
@@ -1067,15 +1203,6 @@ def _build_tool_refinement_event(
     purpose = extract_tool_purpose(raw_input)
     if purpose:
         purpose = _redact(purpose)
-    # Refresh the cached shell signal only when this refinement carries a kind
-    # (kind is optional on updates); a kind-less refinement must not clobber a
-    # True cached by the initial tool_call. Mirrors AcpClient exactly.
-    if shell_cache is not None:
-        if isinstance(kind, str) and kind:
-            shell_cache[_rk] = is_shell_kind(kind)
-        is_shell = shell_cache.get(_rk, False)
-    else:
-        is_shell = is_shell_kind(kind) if isinstance(kind, str) and kind else False
     return AcpEvent(
         kind=EVENT_TOOL_CALL_UPDATE,
         title=title_str,

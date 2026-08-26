@@ -27,22 +27,27 @@ surfaces as a flake in a file you never touched.
 
 ## Rule 0 — Know which conftest is under your file BEFORE you isolate anything
 
-`setup.cfg` declares three testpaths and they do **not** get the same fixtures. The
+`setup.cfg` declares two testpaths and they do **not** get the same fixtures. The
 table is in [testing-conventions.md](../../../../../docs/system-specs/common/testing-conventions.md)
 § Which conftest you are standing on — read it rather than a second copy here, which
-would drift. The short version: only `test/` gets `test/conftest.py`; `transfer/` and
-`src/kiro_crew/apps/builtins/*/tests/` get the rootdir `conftest.py` plus that app's
+would drift. The short version: only `test/` gets `test/conftest.py`;
+`src/kiro_crew/apps/builtins/*/tests/` gets the rootdir `conftest.py` plus that app's
 own `tests/conftest.py` where one exists.
 
-The rootdir `conftest.py` is the **host-mutation floor** — the guards that protect the
-developer's machine, so they hold everywhere. Everything else is in `test/conftest.py`.
+The rootdir `conftest.py` is the **host floor** — the guards that protect the
+developer's machine, so they hold everywhere. That covers damage (temp dirs, the data
+home, services) and *resource exhaustion*: the xdist worker budget is registered there,
+from the repo-root `xdist_budget.py`, because a run that spawns one worker per core on a
+small laptop takes the machine down and does not care which testpath asked. Everything
+else is in `test/conftest.py`.
 
 Getting this wrong is the most expensive mistake in this suite, because it fails
 **silently and asymmetrically**: an in-package test that assumes `test/conftest.py`'s
 fixtures passes on CI (where the operator's home is empty) and damages a real install
-locally. When you add isolation, ask: *could a test in ANY testpath damage the host
-without this?* If yes it belongs at the rootdir; if no, put it in `test/conftest.py`,
-where the in-package suites pay nothing for it.
+locally. When you add isolation, ask: *could a test in ANY testpath damage the host —
+or consume enough memory, cores or disk to take it down — without this?* If yes it
+belongs at the rootdir; if no, put it in `test/conftest.py`, where the in-package suites
+pay nothing for it.
 
 ## Rule 1 — The side-effect floor: what actually leaks
 
@@ -80,8 +85,12 @@ Two shapes escape the env var:
   shared with the real installed agent — `~/.kiro/settings/mcp.json` is the live
   agent's MCP server list. `_isolate_shared_kiro_paths` redirects these from a table,
   and `test/test_host_isolation_floor.py` **fails when `src/` grows a new one**. That
-  ratchet covers IMPORT-TIME bindings only: a lazy resolver such as
-  `config.paths.kiro_home()` still names the real `~/.kiro`, so isolate that yourself.
+  ratchet covers IMPORT-TIME bindings only. The lazy resolver
+  `config.paths.kiro_home()` — and so `kiro_agents_dir()` / `kiro_sessions_dir()` — is
+  yours to isolate, with `KIRO_HOME` or by patching `Path.home()`; they are not
+  interchangeable, because the env var outranks the other. A test that skipped this
+  projected the developer's *installed* agent specs and failed with an
+  `AcpRuntimeError` naming a prompt file in an unrelated worktree.
 
   Two entries are excluded because they must *never* be redirected —
   `security._EXTRACT_INTO_TRUST_ROOT_RE` and `kiro_usage_api._CLI_SQLITE_DBS` are
@@ -125,6 +134,24 @@ The fix was not better cleanup. It was giving the singleton a **session-scoped**
 directory belonging to no individual test. When you touch a subsystem with a background
 worker, ask: *which directory did its thread capture, and does anything delete that
 directory underneath it?*
+
+**The same shape, one level up: a stub that replaces a `shutdown`/`close`/`stop` is
+not a stop.** Three tests needed to observe *that* the metrics provider's `shutdown`
+was called, so they replaced it with a recorder — and the real `shutdown` is what stops
+OpenTelemetry's exporter thread. That thread then survived for the life of the worker,
+and because the OTel SDK reinstalls it in every fork child via `os.register_at_fork`,
+the sandbox's userns probe forked a MULTITHREADED child. `unshare(CLONE_NEWUSER)`
+implies `CLONE_THREAD`, which the kernel refuses with EINVAL unless the caller is
+single-threaded, and EINVAL is indistinguishable from "no `CONFIG_USER_NS`" — so the
+worker cached "this host has no sandbox backend" and every later sandboxed spawn failed
+closed. 19 red tests in two app suites, each passing alone, none of them a metrics test.
+**Spy and delegate; never replace a lifecycle method.** The rootdir conftest now fails
+the test that leaves an exporter thread running.
+
+Two general lessons worth carrying out of that one: a thread whose target is a bound
+method keeps its own object alive, so dropping references never collects it; and
+anything registered with `os.register_at_fork` runs inside `os.fork()`, before it
+returns, so a fork child is not reliably single-threaded.
 
 Related traps in the same family:
 
@@ -183,6 +210,22 @@ Either way the real function runs, the assertion passes for the wrong reason, an
 test pays real time. **Treat an unexpectedly slow "mocked" test as evidence the mock
 missed.**
 
+A seventh: **the host is an input, and a "surely-unused" number is not a constant.**
+`999999` reads as an impossible PID and is not — `pid_max` is 4194304, so on a
+long-running host it names a live process. That broke two tests in opposite ways: one
+stopped pruning an entry whose owner "must be dead", and one accused a planted `ps` shim
+of executing when it had not. If the code *probes* the PID, pin the probe; if the number
+must never appear in real output, pick one no OS can allocate (`99999999999`).
+
+The host's free MEMORY is an input too, and the most-used probe of it is
+`SubagentManager.spawn`, which refuses — registering nothing in `_tasks` — on a
+pressured machine. A refusal is still a `SubagentInfo`, so the test dies a line
+later on a bare `KeyError`, not on the assert that would have named the cause. Any
+file driving `spawn` takes `pytestmark = pytest.mark.usefixtures("healthy_host_memory")`,
+and `test_subagent_spawn_host_pin.py` fails when a new one does not. The two guards it
+pins, and why it stays transparent for the parser's own tests, are in
+testing-conventions § Determinism 1.
+
 ## Rule 3 — Cross-platform: macOS, Linux (x86_64 + arm64), Windows
 
 - **Route POSIX calls through `platform_compat`.** See AGENTS.md's shim table. Most
@@ -210,6 +253,12 @@ missed.**
 - Windows gaps are tracked as burn-down lists, not scattered skips:
   `test/windows-collect-ignore.txt` and `test/windows-expected-failures.txt`. Anything
   NOT listed still fails the job. Delete a line when you fix its test.
+- **Never `--deselect` a whole file for a missing host capability.** Guard the test that
+  needs it — `skipif(not userns_available())` for the OS sandbox — so the report names the
+  capability. A deselect is invisible in the output, takes the file's other tests with it,
+  and never goes red when its reason expires: eleven such files kept 608 tests off every
+  PR, of which 523 would have run on all three platforms, long after the cost that
+  justified the exclusion had been fixed.
 
 ## Rule 4 — Diagnosing a residue failure
 
@@ -233,8 +282,8 @@ spawned without `cwd=`.
 
 ## Rule 5 — Keep the parallel suite fast
 
-At ~26.5k tests, **per-test setup cost dominates any single slow test** — an autouse
-fixture is paid ~26,500 times. Profile, never guess; compare candidates back to back on
+At ~56.5k tests, **per-test setup cost dominates any single slow test** — an autouse
+fixture is paid ~56,500 times. Profile, never guess; compare candidates back to back on
 the same host (`git stash`, run, pop, run), because a loaded host makes an absolute
 number meaningless.
 
@@ -257,6 +306,31 @@ of the file you mutated, not from git — `git checkout --` discards unrelated u
 work — and sequence with `;`, not `&&`, or the restore only runs when the mutation
 did *not* work.
 
+## Rule 6 — MEMORY is the other budget, and collection is most of it
+
+A worker costs ~1.5 GiB, and ~750 MiB of that is paid before your test runs: every
+xdist worker independently collects all 56,546 items, and 99% of that footprint is
+private, so more workers never amortize it. This is why `-n auto` is bounded by
+available memory — on an 8–16 GiB laptop the full suite otherwise swaps the machine.
+
+The consequence for how you write a test:
+
+- **An allocation at module scope is multiplied by every worker, and outlives the
+  test.** A big literal inside `@pytest.mark.parametrize` is the worst shape: it is
+  built while the module is IMPORTED and the mark keeps it alive on the function
+  object for the whole session, so one test's payload is charged to all of them. Two
+  such literals — a 64 MiB frame and a 40 MB string — cost 102 MiB per worker until
+  they were moved into the test bodies behind a sentinel.
+- **A transient peak counts too**, because a worker's high-water mark is what the
+  budget must reserve. Building an image as a list of per-pixel tuples cost ~390 MiB
+  for a 17 MB PNG; one `frombytes` over a bytes buffer was 10x smaller and
+  byte-equivalent.
+- **Derive a size from the production constant** rather than restating it. A literal
+  `40_000_001` beside a `_MAX_LAYER_B_CHARS` of `40_000_000` hides both the coupling
+  and the cost, and goes stale silently.
+- Suspect a **module-scope literal** whenever a file's collection RSS is large; measure
+  it with `pytest <file> --collect-only` and `/proc/self/status`'s `VmHWM`.
+
 ## Checklist before you push a test
 
 - [ ] Nothing outlives the run: no temp residue, no write to `~/.kiro` or the real data
@@ -272,5 +346,7 @@ did *not* work.
 - [ ] Source files read via `_REPO_ROOT = Path(__file__).resolve().parents[N]`, never a
       relative `Path("src/...")` — xdist workers may change CWD
 - [ ] Passes at `-n0` **and** under `-n auto`, and passes when run alone
+- [ ] No large allocation at module scope — especially not inside `parametrize`, where
+      every worker pays it at collection and holds it for the session
 - [ ] Cross-platform: `platform_compat` for process/signal/lock calls, no assumption
       about path separators, case sensitivity, `/tmp`, or timer granularity
