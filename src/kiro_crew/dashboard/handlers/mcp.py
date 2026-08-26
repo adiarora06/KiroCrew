@@ -2448,7 +2448,11 @@ async def api_mcp_gateway_enable(request: web.Request) -> web.Response:
                 source="dashboard",
                 resources=f"enabled={enabled} error={exc}",
             )
-            return web.json_response({"error": f"apply failed: {exc}"}, status=500)
+            # The exception detail is in the SEL log above; the client body
+            # (rendered verbatim into a localized UI) gets a generic message.
+            return web.json_response(
+                {"error": "apply failed", "code": "mcp_apply_failed"}, status=500
+            )
 
     sel().log_api_access(
         caller=request.get("user", "dashboard"),
@@ -3091,8 +3095,11 @@ async def api_mcp_gateway_set_stub(request: web.Request) -> web.Response:
         except ConfigReadError:
             return web.json_response({"error": "config.json is corrupt"}, status=500)
         except OSError as exc:
+            # OSError can carry a filesystem path; keep it server-side and send
+            # the client a generic message (rendered verbatim into a localized UI).
+            logger.warning("mcp config lock failed: %s", exc)
             return web.json_response(
-                {"error": f"could not lock config.json: {exc}", "code": "config_lock_failed"},
+                {"error": "could not lock config.json", "code": "config_lock_failed"},
                 status=503,
             )
 
@@ -3123,7 +3130,11 @@ async def api_mcp_gateway_set_stub(request: web.Request) -> web.Response:
                     source="dashboard",
                     resources=f"{audited} stub={stub} error={exc}",
                 )
-                return web.json_response({"error": f"apply failed: {exc}"}, status=500)
+                # Detail is in the SEL log above; the verbatim-rendered client
+                # body gets a generic message.
+                return web.json_response(
+                    {"error": "apply failed", "code": "mcp_apply_failed"}, status=500
+                )
         elif not nothing_written:
             # No callback means no gateway wired this process -- but the allowlist
             # was already persisted above, so the change WAS recorded and takes

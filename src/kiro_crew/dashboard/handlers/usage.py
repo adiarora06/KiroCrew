@@ -1695,7 +1695,10 @@ def _parse_sessions() -> dict:
     try:
         entries = list(sessions_dir.iterdir())
     except OSError as exc:
-        return {"error": f"Cannot read sessions directory: {exc}"}
+        # The OSError carries a filesystem path; keep it server-side and return
+        # a generic message (the ``error`` field is rendered verbatim in the UI).
+        logger.warning("usage: cannot read sessions directory: %s", exc)
+        return {"error": "cannot read sessions directory", "code": "sessions_dir_unreadable"}
 
     for f in entries:
         if f.suffix != ".jsonl":

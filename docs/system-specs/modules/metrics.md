@@ -267,7 +267,7 @@ presence without the endpoint string),
 
 | `kirocrew.process.threads.python` | gauge | — | `metrics/process_gauges.py::register_process_gauges`, callbacks run only at reader collection (no polling threads). `threading.active_count()`. |
 | `kirocrew.process.threads.os` | gauge | — | Same module; `platform_compat.process_thread_count(os.getpid())` — OS-level count that catches native pools (ggml, grpc) invisible to `threading`. Linux-only; None elsewhere (gap, not zero). |
-| `kirocrew.process.open_fds` | gauge | — | Same module; `/proc/self/fd` or `/dev/fd` entry count minus the enumeration fd. |
+| `kirocrew.process.open_fds` | gauge | — | Same module; delegates to `platform_compat.count_open_fds` (shared with gatewayd's zombie-diagnostic `fd_count`): `/proc/self/fd` or `/dev/fd` entry count minus the enumeration fd; Windows reports the kernel handle count (platform-dependent semantics). |
 | `kirocrew.process.memory.rss_bytes` / `.peak_rss_bytes` | gauge (By) | — | Same module; delegate to `platform_compat.proc_rss_bytes` (current) / `proc_peak_rss_bytes` (high-water mark), both cross-platform. A 0 return maps to None: gap, never a fake zero sample. |
 | `kirocrew.process.cpu.seconds` | counter (s) | — | Same module; `platform_compat.proc_cpu_seconds` cumulative user+system CPU, exported CUMULATIVE (rebuild-idempotent; see exporter row). |
 | `kirocrew.process.gc.collections` / `.collected` / `.uncollectable` | counter | `generation` (`0`/`1`/`2`) | Same module; `gc.get_stats()` per generation. Rules GC in/out of a leak diagnosis (rising uncollectable = reference cycles; flat collected with rising RSS = native leak). |
@@ -592,8 +592,43 @@ both emitted spellings, with and without the colon — and the `[System: …]`
 regenerate line): a marker absent from `_MARKERS` does NOT surface as its own
 bucket, it
 folds into the PRECEDING recognised block and mislabels those bytes, so the set
-must stay complete. Only leading bytes before the first marker fall outside every
-block and surface as `unclassified`. The returned sizes sum EXACTLY to `len(prompt)` (closure); the user's
+must stay complete.
+A block owns the span from its opener up to **the earlier of** the next opener and
+its OWN closer (`_CLOSERS`, keyed by the same labels — only the closers the
+assembly actually emits are listed, so extending it is a data change rather than a
+scanner edit). **A label with an opener in `_MARKERS` but no `_CLOSERS` entry keeps
+the absorbing behaviour this table exists to remove**, so the two are kept in step
+by grepping the assembly for `[End ` / `[END ` rather than by adding a closer only
+when one is noticed. One opener can have MORE than one closer spelling — a hook
+context is closed `[End of hook context]` by `context.py` and `[End hook context]`
+by `chat_runner.py` — and an entry covering one spelling silently leaves the other
+block absorbing what follows it, so such a label carries an alternation rather than
+whichever spelling was found first. The closer taken is the LAST match before the next opener, not the
+first: a block's content can quote its own closer — a custom agent prompt that
+documents the envelope it is injected into embeds `[END AGENT SYSTEM PROMPT]`
+verbatim — and first-match would end the block at that quotation and book the rest
+of its real body as `unclassified`. Last-match is right by construction, because
+nothing of the block follows its real closer, so any earlier occurrence in range is
+content. The closer search is bounded by the next opener, which is what
+keeps a WRAPPER correct: `[SESSION CONTEXT` closes long after the memory family
+opens inside it, never finds its own closer in range, and ends where it always did
+— unbounded, it would swallow every block nested within. The blank line a block
+emits right after its closer stays with that block, so a closed block does not
+leave a two-character crumb behind it. Escaping matters in one place worth naming:
+`[End of skill]` is a PREFIX of `[End of skills]`, so an unanchored closer would
+let one loaded skill claim the whole skills index that follows it.
+Characters that fall between a block's closer and the next opener therefore
+surface as `unclassified`, as do leading bytes before the first marker. This is
+the honest reading and it replaces a silent one: without closer awareness a span
+ran all the way to the next opener, which turned *unattributed* bytes into
+*MIS-attributed* ones with no way for a reader to tell a genuinely large block from
+a small one that had absorbed its neighbours. The trigger is ordinary rather than
+exotic — the blocks between two openers are conditional (workspace identity and the
+docs pointer are skipped for a custom agent, the memory family for a session sealed
+from the user's memory), so their absence is exactly what lets an earlier block
+absorb everything downstream of it. Measured on one real session, a ~470-character
+`[USER PROFILE]` block was reported as 8,116.
+The returned sizes sum EXACTLY to `len(prompt)` (closure); the user's
 own text is carved into the `your_message` label using the exact `(start, end)`
 span that `build_message` reports through its `user_span_out` out-parameter. That
 span is authoritative because `build_message` is the only code that sees every

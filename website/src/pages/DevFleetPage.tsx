@@ -11,6 +11,7 @@ import InfoTip from '../components/InfoTip'
 import Modal from '../components/Modal'
 import Clickable from '../components/Clickable'
 import { useNavigate } from 'react-router-dom'
+import { useDocumentImeLatch } from '../hooks/useImeGuard'
 import { useAppDispatch } from '../store'
 import { addNotification } from '../store/notificationsSlice'
 import { setPendingInput } from '../store/chatSlice'
@@ -392,6 +393,10 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
   const popRef = useRef<HTMLDivElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const confirmRef = useRef<HTMLButtonElement>(null)
+  // Shared IME latch for the boundary-Tab trap below (see the comment on the
+  // Tab branches): the trap listens at document capture, so it receives
+  // NATIVE KeyboardEvents that the synthetic-only guard cannot consume.
+  const imeLatch = useDocumentImeLatch(open)
 
   const close = useCallback(() => {
     setOpen(false)
@@ -409,11 +414,25 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // An Escape the IME owns is cancelling a candidate, not the popover —
+        // and `close()` also yanks focus back to the trigger, the same harm
+        // as the Tab wrap below. Same claim, same reason.
+        if (!imeLatch.claimKey(e)) return
         close()
       } else if (e.key === 'Tab' && e.shiftKey && document.activeElement === cancelRef.current) {
+        // A boundary Tab the IME owns must not cycle focus — the user is
+        // choosing a candidate, not leaving the field. `claimKey` owns the
+        // whole decline (native-event contract in useImeGuard.ts) and must
+        // run before the preventDefault() and focus move. Both ring
+        // boundaries are buttons today, so no composition can start on them —
+        // the guard pins that this stays safe if the popover ever grows a
+        // text field. Mid-popover Tabs fall through: they are the browser's
+        // to move, so they are also not the trap's to claim.
+        if (!imeLatch.claimKey(e)) return
         e.preventDefault()
         confirmRef.current?.focus()
       } else if (e.key === 'Tab' && !e.shiftKey && document.activeElement === confirmRef.current) {
+        if (!imeLatch.claimKey(e)) return
         e.preventDefault()
         cancelRef.current?.focus()
       }
@@ -433,7 +452,7 @@ function ConfirmBtn({ title, desc, confirmLabel, onConfirm, btn, children }: Con
       window.removeEventListener('scroll', onScrollOrResize, true)
       window.removeEventListener('resize', onScrollOrResize)
     }
-  }, [close, open])
+  }, [close, open, imeLatch])
 
   const toggle = () => {
     if (!open && triggerRef.current) setRect(triggerRef.current.getBoundingClientRect())

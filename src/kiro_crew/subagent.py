@@ -64,8 +64,14 @@ from kiro_crew.hooks import (
     safe_read_file,
 )
 from kiro_crew.llm_helpers import (
+    FALLBACK_CANDIDATE_ATTEMPTS,
     TRANSIENT_RETRIES,
+    TURN_FALLBACK_ATTR,
+    FallbackState,
     acp_error_is_transient,
+    advance_fallback_candidate,
+    configured_fallback_chain,
+    provider_fallback_active,
     transient_retry_delay,
 )
 from kiro_crew.mcp_gateway import STUB_MODULE
@@ -79,7 +85,11 @@ from kiro_crew.providers.base import (
     LLMEvent,
 )
 from kiro_crew.resource_status import cached_admission_check
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import (
+    redact_and_truncate,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 from kiro_crew.sel import sel
 from kiro_crew.session import SessionManager
 from kiro_crew.session_surface import has_dashboard_surface
@@ -291,6 +301,16 @@ def _redact(text: str) -> str:
     text, _ = redact_exfiltration_urls(text)
     text, _ = redact_credentials(text)
     return text
+
+
+def _redact_and_truncate(text: str, max_chars: int) -> str:
+    """Redact over the FULL text, then truncate (never ``_redact(x[:n])``).
+
+    Truncating first can cut a credential in half at the boundary, leaving a
+    fragment the redaction regexes no longer match — the raw remainder would
+    then leak into the surface this feeds. Delegates to the canonical helper.
+    """
+    return redact_and_truncate(text, max_chars)
 
 
 # Bounds for a rendered exception chain. The rendering reaches a WS frame, a
@@ -561,7 +581,9 @@ def _digest_hold_secs() -> float:
 DIGEST_HOLD_SECS = _digest_hold_secs()
 
 
-def _timeout_context(info: "SubagentInfo", *, include_elapsed: bool = True, turn_limit: int = 0) -> str:
+def _timeout_context(
+    info: "SubagentInfo", *, include_elapsed: bool = True, turn_limit: int = 0
+) -> str:
     """Build a human-readable context string for timeout errors.
 
     ``turn_limit`` is the resolved effective turn cap (per-spawn override →
@@ -720,9 +742,7 @@ def _proc_subtree_counts(pid: Optional[int]) -> tuple[Optional[int], Optional[in
     return (procs, stubs)
 
 
-def _attributed_count(
-    total: Optional[int], sharers: int, previous: Optional[int]
-) -> Optional[int]:
+def _attributed_count(total: Optional[int], sharers: int, previous: Optional[int]) -> Optional[int]:
     """One co-tenant's share of a subtree *total*, or *previous* if unmeasured.
 
     Counts follow the same per-sharer split as the RSS/CPU attribution (see
@@ -1344,6 +1364,36 @@ class SubagentInfo:
 
 # Callback: (subagent_info) -> None
 AnnounceCallback = Callable[[SubagentInfo], Awaitable[None]]
+
+
+def _injection_notice_outcome(info: "SubagentInfo") -> str:
+    """One-sentence outcome line for the injection-failure fallback notice.
+
+    ``notify_injection_failed`` fires whenever a terminal report could not be
+    injected into the parent — for EVERY terminal state, not just successful
+    completion. Asserting "finished" for a run that was stopped or rejected
+    before it executed misdescribes the outcome, so the line branches on the
+    record's canonical :attr:`SubagentInfo.outcome` with one before-start
+    refinement per branch: ``_exec_started`` — the marker ``_run_inner`` sets
+    when execution actually begins — is ``None`` exactly when the run never
+    executed, which covers every spawn-rejection site (all of them construct
+    their record without it) with no wording contract between ``error``
+    strings and this notice. The "no result to deliver" phrasings are guarded
+    on the absence of any output so they can never contradict the result-path
+    recovery hint. Pure function of the record, unit-tested per branch.
+    """
+    never_ran = info._exec_started is None and not info.result and not info.result_path
+    outcome = info.outcome
+    if outcome == "stopped":
+        if never_ran:
+            return "The run was stopped before it started, so there is no result to deliver."
+        return "The run was stopped before it completed."
+    if outcome == "failed":
+        if never_ran:
+            return "The run failed before it started, so there is no result to deliver."
+        return "The agent failed before a result could be delivered."
+    return "The agent finished but result delivery timed out."
+
 
 # Event callback: (event_type, info, extra_data) -> None
 SubagentEventCallback = Callable[[str, "SubagentInfo", dict], Awaitable[None]]
@@ -2964,7 +3014,11 @@ class SubagentManager:
         Appends a synthetic error to the dashboard slot (UI) and queues a
         failure message into ``slot._pending_subagent_failures`` so the LLM
         learns about the failure on the next ``_run_chat`` turn and can read
-        the result from disk if needed.
+        the result from disk if needed. The notice's outcome line is derived
+        from the record (:func:`_injection_notice_outcome`) rather than
+        asserting completion: this path fires for every terminal state whose
+        report could not be injected, including runs cancelled or rejected
+        before they ever executed.
         """
         try:
             # Lazy: the dashboard layer must not be imported by a core module at
@@ -2997,7 +3051,7 @@ class SubagentManager:
                 f"{SUBAGENT_COMPLETION_PREFIX}\n"
                 f"Agent `{info.id}` ❌ {reason}\n"
                 f"Task: {task_preview}\n"
-                f"The agent finished but result delivery timed out.{result_hint}"
+                f"{_injection_notice_outcome(info)}{result_hint}"
             )
 
             # Queue for LLM context drain on next _run_chat
@@ -3070,7 +3124,7 @@ class SubagentManager:
         return [
             {
                 "id": a.id,
-                "task": _redact(a.task[:80]),
+                "task": _redact_and_truncate(a.task, 80),
                 "agent": _redact(a.agent),
                 "parent": a.parent_session_key,
                 "rss_mb": round(a.last_rss_gb * 1024, 1),
@@ -3685,14 +3739,16 @@ class SubagentManager:
         """
         if not key.startswith("subagent:"):
             return False
-        conv_id = key[len("subagent:"):]
+        conv_id = key[len("subagent:") :]
         try:
             state = read_state(conv_id) or {}
         except Exception:
             return False
         return bool(state.get("keep"))
 
-    def _promote_conversation(self, conv_id: str, conv_key: str, last_used: float | None = None) -> None:
+    def _promote_conversation(
+        self, conv_id: str, conv_key: str, last_used: float | None = None
+    ) -> None:
         """Single choke point for promoting a conversation's retention (#1115).
 
         Writes all three retention surfaces together so they cannot drift:
@@ -3728,15 +3784,19 @@ class SubagentManager:
                 if not state.get("keep"):
                     continue
                 conv_key = str(state.get("conversation_key") or "") or f"subagent:{d.name}"
-                conv_id = conv_key[len("subagent:"):]
+                conv_id = conv_key[len("subagent:") :]
                 sid = str(state.get("session_id") or "")
                 last_used = float(state.get("updated_at") or state.get("started") or 0.0)
-                out.append((
-                    conv_id, conv_key, sid,
-                    str(state.get("provider") or PROVIDER_LABEL_DEFAULT),
-                    str(state.get("cwd") or ""),
-                    last_used,
-                ))
+                out.append(
+                    (
+                        conv_id,
+                        conv_key,
+                        sid,
+                        str(state.get("provider") or PROVIDER_LABEL_DEFAULT),
+                        str(state.get("cwd") or ""),
+                        last_used,
+                    )
+                )
             except Exception:
                 logger.debug("registry rebuild: skipping %s", d, exc_info=True)
         return out
@@ -4098,15 +4158,11 @@ class SubagentManager:
         task = asyncio.create_task(self._deliver_followups(info))
         self._followup_watchers[run_id] = task
 
-        def _done(
-            t: "asyncio.Task", _id: str = run_id, _info: SubagentInfo = run_info
-        ) -> None:
+        def _done(t: "asyncio.Task", _id: str = run_id, _info: SubagentInfo = run_info) -> None:
             self._followup_watchers.pop(_id, None)
             _info._followup_watcher = False
             if not t.cancelled() and t.exception() is not None:
-                logger.warning(
-                    "follow_up watcher for %s failed", _id, exc_info=t.exception()
-                )
+                logger.warning("follow_up watcher for %s failed", _id, exc_info=t.exception())
                 return
             if (
                 not t.cancelled()
@@ -4174,7 +4230,7 @@ class SubagentManager:
             # sweep, so the messages vanished with no event. The slice keeps
             # anything queued while we were announcing (the done-callback
             # re-arms for it).
-            info.pending_followups = info.pending_followups[len(dropped):]
+            info.pending_followups = info.pending_followups[len(dropped) :]
             return
         # SNAPSHOT, do not drain: messages stay in ``pending_followups`` until
         # their outcome is SETTLED (dispatched, or their failure announced).
@@ -4189,12 +4245,10 @@ class SubagentManager:
             return
 
         def _settle() -> None:
-            info.pending_followups = info.pending_followups[len(messages):]
+            info.pending_followups = info.pending_followups[len(messages) :]
 
         if info.user_stopped:
-            logger.info(
-                "follow_up for %s suppressed — the user stopped the run", info.id
-            )
+            logger.info("follow_up for %s suppressed — the user stopped the run", info.id)
             self._audit_followup(info, "followup_suppressed")
             _settle()
             await self._announce_followup_failure(
@@ -4223,9 +4277,7 @@ class SubagentManager:
                 break
             await asyncio.sleep(self._FOLLOWUP_BUSY_RETRY_SECS)
         if err:
-            logger.warning(
-                "follow_up delivery for %s failed: %s", info.id, err.split(":", 1)[0]
-            )
+            logger.warning("follow_up delivery for %s failed: %s", info.id, err.split(":", 1)[0])
             self._audit_followup(info, "followup_failed")
             _settle()
             # continue_conversation's typed failures are already done
@@ -4233,9 +4285,7 @@ class SubagentManager:
             if child is not None:
                 await self._announce_followup_failure(info, "", failure_info=child)
             else:
-                await self._announce_followup_failure(
-                    info, f"follow_up dispatch failed: {err}"
-                )
+                await self._announce_followup_failure(info, f"follow_up dispatch failed: {err}")
         else:
             self._audit_followup(info, "followup_dispatched")
             _settle()
@@ -4263,9 +4313,8 @@ class SubagentManager:
         label_msgs = messages if messages is not None else info.pending_followups
         synthetic = failure_info or SubagentInfo(
             id=uuid.uuid4().hex[:8],
-            task=f"[follow_up of run {info.id}] " + _redact(
-                "; ".join(m[:120] for m in label_msgs) or "queued follow-up"
-            ),
+            task=f"[follow_up of run {info.id}] "
+            + _redact("; ".join(m[:120] for m in label_msgs) or "queued follow-up"),
             done=True,
             parent_session_key=info.parent_session_key,
             error=reason,
@@ -4273,9 +4322,7 @@ class SubagentManager:
         try:
             await self._on_done(synthetic)
         except Exception:
-            logger.warning(
-                "follow_up failure announce for %s failed", info.id, exc_info=True
-            )
+            logger.warning("follow_up failure announce for %s failed", info.id, exc_info=True)
 
     def _audit_followup(self, info: SubagentInfo, outcome: str) -> None:
         try:
@@ -4299,9 +4346,7 @@ class SubagentManager:
         busy = self._conversation_busy(conv_key)
         if busy is not None:
             return False, f"conversation_busy: run {busy.id} is in flight"
-        provider_label = (
-            self._sessions.conversation_provider(conv_key) or PROVIDER_LABEL_DEFAULT
-        )
+        provider_label = self._sessions.conversation_provider(conv_key) or PROVIDER_LABEL_DEFAULT
         sid = self._sessions.forget_conversation(conv_key)
         self._conversations.pop(conv_key, None)
         # Demote the persisted source of truth too (#1115): with the disk
@@ -4809,21 +4854,35 @@ class SubagentManager:
             try:
                 await asyncio.to_thread(mark_delivered, agent_id)
             except Exception:
-                logger.debug("Failed to mark drained subagent %s delivered", agent_id, exc_info=True)
+                logger.debug(
+                    "Failed to mark drained subagent %s delivered", agent_id, exc_info=True
+                )
 
     def _settle_digest_holds(self, info: SubagentInfo) -> None:
         """Settle delivery tombstones for wave members whose injection was
         held for this member's digest. Called ONLY after ``_on_done`` returned
-        without raising — the digest has been handed off, so marking the held
-        members delivered no longer risks the restart-loss window
-        (settling at digest composition, before routing, would).
+        without raising — and it is a real settle only for the routes where
+        that return IS the confirmation. Both dashboard routes hand off
+        asynchronously, so they detach the ids before ``_on_done`` returns and
+        owe them to the parent's consumption instead (the queue branch via
+        ``_defer_queued_delivery``, the direct-injection branch via the same
+        slot ledger), leaving this a no-op there. Marking the held members
+        delivered no longer risks the restart-loss window here (settling at
+        digest composition, before routing, would).
+
+        The ids are taken off ``info`` BEFORE settling, so a re-entry cannot
+        write a second tombstone and a route that detached them first leaves
+        this a no-op.
+
+        A failing tombstone write is logged and skipped, never raised: one
+        unwritable run folder must not strand the rest of the chunk.
         """
-        for _hid in info._digest_settle_ids:
+        ids, info._digest_settle_ids = info._digest_settle_ids, []
+        for _hid in ids:
             try:
                 mark_delivered(_hid)
             except Exception:
                 logger.debug("Failed to settle held subagent %s", _hid, exc_info=True)
-        info._digest_settle_ids = []
 
     def get(self, agent_id: str) -> SubagentInfo | None:
         """Get agent info by ID."""
@@ -5567,17 +5626,27 @@ class SubagentManager:
         # in the window between the event and the later session_id state write
         # cannot lose it — orphan recovery reads these from disk (GPT review on
         # #3582). Off-loop (to_thread): update_state does a synchronous fsync, so
-        # a slow FS must not freeze the gateway/heartbeat. Best-effort — a
-        # persistence hiccup must not block the spawn.
-        try:
-            await asyncio.to_thread(
-                update_state,
-                info.id,
-                requested_model=info.requested_model,
-                resolved_model=info.resolved_model,
-            )
-        except Exception:
-            logger.debug("Failed to persist model provenance for %s", info.id, exc_info=True)
+        # a slow FS must not freeze the gateway/heartbeat. Best-effort with ONE
+        # bounded retry: this write is the SINGLE owner of these two fields on
+        # the spawn path (#5394) — the later session_id write no longer doubles
+        # as a fallback, so a transient failure gets its second chance HERE
+        # rather than from a second writer downstream. update_state reports a
+        # silently-skipped merge (unreadable state) as False, which counts as a
+        # failure for the retry — only a REPORTED write ends the loop. A
+        # persistence hiccup must still never block the spawn.
+        for _provenance_attempt in range(2):
+            try:
+                _wrote = await asyncio.to_thread(
+                    update_state,
+                    info.id,
+                    requested_model=info.requested_model,
+                    resolved_model=info.resolved_model,
+                )
+                if _wrote:
+                    break
+                logger.debug("Provenance write skipped (unreadable state) for %s", info.id)
+            except Exception:
+                logger.debug("Failed to persist model provenance for %s", info.id, exc_info=True)
         await self._fire_event(
             "subagent_spawn",
             info,
@@ -5606,11 +5675,15 @@ class SubagentManager:
             state_update: dict[str, object] = {
                 "session_id": session_id,
                 "provider": provider_type,
-                # Persist the resolved/requested models so orphan-recovery
-                # completions (which rebuild the record from disk, not memory)
-                # can still show provenance (Design suggestion on #3582).
-                "resolved_model": info.resolved_model,
-                "requested_model": info.requested_model,
+                # Model provenance (requested_model/resolved_model) is NOT
+                # re-written here: the crash-safe write BEFORE the
+                # subagent_spawn event above is the single owner of those two
+                # fields on the spawn path, and a transient failure there is
+                # handled by that write's own bounded retry (#5394). This write
+                # still performs the same read-merge-rewrite either way, so the
+                # point is one authoritative writer, not saved I/O. The CC-path
+                # refinement below still updates resolved_model when it first
+                # becomes known.
                 # keep marks this run's session files as resume material: the
                 # orphan reconciler and tombstone pruner skip file deletion
                 # for keep runs (restart-safe — read from disk, not memory).
@@ -5667,6 +5740,13 @@ class SubagentManager:
             # intentionally identical semantics — a fix to either's activity
             # predicate or budget rules must be mirrored in the other.
             post_activity_attempts = 0
+            # Throttle-exhaustion fallback chain (agent.fallback_model):
+            # engaged only once the zero-activity budget above is spent, same
+            # trigger as stream_and_collect's Case 2.75 and the dashboard's
+            # fallback branch. State is per-run (this closure), matching
+            # "a slot/session-scoped equivalent" — the sticky marker for the
+            # session lives on the provider via TURN_FALLBACK_ATTR.
+            _fb_state = FallbackState(configured_fallback_chain())
             msg = full_message
             while True:
                 try:
@@ -5690,7 +5770,74 @@ class SubagentManager:
                             raise
                         post_activity_attempts += 1
                     elif attempts >= TRANSIENT_RETRIES:
-                        raise
+                        # ── Throttle-exhaustion fallback chain ──
+                        # Zero-activity budget spent: walk agent.fallback_model
+                        # before surfacing (empty chain ⇒ raise exactly as
+                        # before this feature). Two attempts per candidate
+                        # (FALLBACK_CANDIDATE_ATTEMPTS), ~2s backoff each —
+                        # NOT the exponential same-model curve; see
+                        # llm_helpers Case 2.75 for the rationale.
+                        if not _fb_state.chain:
+                            raise
+                        if (
+                            _fb_state.active is not None
+                            and _fb_state.attempts < FALLBACK_CANDIDATE_ATTEMPTS
+                        ):
+                            _fb_state.attempts += 1
+                        else:
+                            _cand = await advance_fallback_candidate(
+                                client,
+                                _fb_state,
+                                surface="subagent",
+                                log_suffix=f", id={info.id}",
+                            )
+                            if _cand is None:
+                                if _fb_state.walked:
+                                    _story = (
+                                        f"{_fb_state.primary or 'the selected model'} "
+                                        f"throttled; fallbacks "
+                                        f"{', '.join(_fb_state.walked)} also unavailable"
+                                    )
+                                    logger.warning(
+                                        "model fallback: chain exhausted (%s) for "
+                                        "subagent %s; surfacing original error",
+                                        _story,
+                                        info.id,
+                                    )
+                                    try:
+                                        exc._kc_fallback_story = _story  # type: ignore[attr-defined]
+                                    except Exception:
+                                        pass
+                                raise
+                        _fb_delay = transient_retry_delay(1)
+                        await self._fire_event(
+                            "subagent_retrying",
+                            info,
+                            {
+                                "attempt": _fb_state.attempts,
+                                "max": FALLBACK_CANDIDATE_ATTEMPTS,
+                                "fallback_model": _fb_state.active or "",
+                            },
+                        )
+                        try:
+                            sel().log_api_access(
+                                caller=info.parent_session_key or f"subagent:{info.id}",
+                                operation="subagent.model_fallback_retry",
+                                outcome="retrying",
+                                source="subagent",
+                                resources=(
+                                    f"subagent_id={info.id},"
+                                    f"model={_fb_state.active or ''},"
+                                    f"attempt={_fb_state.attempts}"
+                                ),
+                            )
+                        except Exception:
+                            logger.debug("SEL audit for fallback retry failed", exc_info=True)
+                        await asyncio.sleep(_fb_delay)
+                        # Zero activity by construction on this arm — replay
+                        # the original prompt, never a continuation.
+                        msg = full_message
+                        continue
                     attempts += 1
                     delay = transient_retry_delay(attempts)
                     logger.warning(
@@ -5839,9 +5986,7 @@ class SubagentManager:
                                 error="child_escalation_limit",
                             )
                         except Exception:
-                            logger.exception(
-                                "failed to reject escalation-limit trigger request"
-                            )
+                            logger.exception("failed to reject escalation-limit trigger request")
                         info.result = result_text or "_Partial output._"
                         info.error = f"child_escalation_limit:{child_escalation_limit}"
                         info.done = True
@@ -5944,9 +6089,7 @@ class SubagentManager:
                                 approved = bool(await approve_cb(event))
                             elif _child_fallback is not None:
                                 approved = bool(
-                                    await _child_fallback(
-                                        event, info.parent_session_key
-                                    )
+                                    await _child_fallback(event, info.parent_session_key)
                                 )
                         except Exception:
                             logger.exception("child approval callback failed")
@@ -6139,6 +6282,24 @@ class SubagentManager:
 
             cleaned, _ = redact_exfiltration_urls(cleaned)
             cleaned, _ = redact_credentials(cleaned)
+        # Model-fallback visibility (agent.fallback_model): a run served by a
+        # fallback model must say so in the delivered result — same contract as
+        # the cron/heartbeat annotation and the dashboard notice card. Model
+        # ids come from config (LLM-reachable via MCP), so they pass the same
+        # redaction as the result body.
+        _fb_marker = getattr(client, TURN_FALLBACK_ATTR, None)
+        if _fb_marker:
+            try:
+                _fb_primary, _fb_candidate = _fb_marker
+                _fb_line = (
+                    f"⚠️ Model '{_fb_primary}' throttled; this run was served by "
+                    f"fallback '{_fb_candidate}'."
+                )
+                _fb_line, _ = redact_exfiltration_urls(_fb_line)
+                _fb_line, _ = redact_credentials(_fb_line)
+                cleaned = f"{_fb_line}\n\n{cleaned}" if cleaned else _fb_line
+            except Exception:
+                logger.debug("fallback annotation failed", exc_info=True)
         info.result = cleaned or "_No response._"
         # Cap disk file and trim memory — gateway decides how much to show based on mode.
         if info.result_path:
@@ -6179,7 +6340,10 @@ class SubagentManager:
             _used, _window = read_context_tokens(client)
             await persist_token_record_async(
                 session_key,
-                info.model or "",
+                # Blank while a fallback serves this run: the explicit pin
+                # would bill the fallback's spend to a model that never
+                # executed; model_source reports what actually ran.
+                ("" if provider_fallback_active(client) else (info.model or "")),
                 _complete_event,
                 provider="claude_code" if is_cc else "acp",
                 surface="subagent",

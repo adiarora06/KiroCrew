@@ -20,13 +20,13 @@ Three properties are load-bearing.
 
 **This is a LIVE probe, and the existing status endpoint is not.**
 ``GET /api/tailnet/status`` deliberately reports the value resolved once at
-startup, because that is what actually went into the origin allowlist. This
-endpoint reports what the machine can do *next*. The two must stay separate: a
-name that resolves now but was absent at startup is exactly the boot race where
+startup, because that is what actually went into the fixed origin allowlist.
+This endpoint reports what the machine can do *next*. The two must stay separate:
+a name that resolves now but was absent at startup is exactly the boot race where
 the origin is NOT trusted, and reporting it as ready would be the
 "checked-but-never-ran shown as a clean result" defect. It gets its own step
-(``restart_gateway``) instead — the first time that race is visible anywhere but
-a log line.
+(``restart_gateway``) instead. The one-click UI resumes after the replacement
+gateway is ready, while the security boundary itself changes only at startup.
 
 **The QR carries a live credential, so it is minted on demand and never cached.**
 The payload is a URL with a session token in its query string. It is not logged,
@@ -53,6 +53,7 @@ from aiohttp import web
 
 from kiro_crew.config import KiroCrewConfig
 from kiro_crew.dashboard import tailnet, tailnet_serve
+from kiro_crew.dashboard.boot_id import current_boot_id
 from kiro_crew.dashboard.handlers._shared import _is_restricted_session
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
 from kiro_crew.dashboard.token_auth import (
@@ -89,6 +90,7 @@ Step = Literal[
     "start_daemon",
     "sign_in",
     "enable_magicdns",
+    "enable_https",
     "trust_off",
     "restart_gateway",
     "occupied",
@@ -116,19 +118,22 @@ def _derive_step(
        four ways there is no usable tailnet name, kept apart because "install
        Tailscale", "start it", "sign in" and "turn MagicDNS on" are four
        different errands.
-    3. ``trust_off`` — a name exists, but the gateway is not configured to accept
+    3. ``enable_https`` — the name exists but the tailnet has not granted
+       certificate provisioning for it. This is a tailnet-wide administrator
+       consent and cannot safely be performed by a gateway process.
+    4. ``trust_off`` — a name exists, but the gateway is not configured to accept
        it as an origin, so publishing would produce a reachable dashboard that
        answers 403. Config first.
-    4. ``restart_gateway`` — configured and resolvable NOW, but the running
-       server resolved nothing at startup (it booted before tailscaled). The
-       origin is genuinely not trusted until a restart, so this must not be
-       reported as ready.
-    5. ``occupied`` — serve holds this port/mount for something that is not this
+    5. ``restart_gateway`` — configured and resolvable NOW, but the running
+       server does not trust this exact name (it may have booted before tailscaled
+       or the node name may have changed). The fixed request boundary is rebuilt
+       only by the formal gateway restart path.
+    6. ``occupied`` — serve holds this port/mount for something that is not this
        dashboard, or its state could not be determined. Publishing would REPLACE
        it, so this refuses and the card renders the manual command
        (``kirocrew tailnet up``) for the operator to run deliberately.
-    6. ``publish`` — everything is in place; one action left.
-    7. ``ready`` — published and trusted.
+    7. ``publish`` — everything is in place; one action left.
+    8. ``ready`` — published and trusted.
     """
     if pinned:
         return "pinned"
@@ -140,9 +145,16 @@ def _derive_step(
         return "sign_in"
     if not probe.name:
         return "enable_magicdns"
+    # An already-published mapping is operational evidence stronger than a
+    # possibly stale CertDomains snapshot. This exception also prevents a brief
+    # control-plane propagation delay after first enablement from taking a
+    # working QR away. For a new mapping, however, an explicit False is a hard
+    # stop: the non-interactive gateway cannot grant tailnet-wide HTTPS consent.
+    if published is not True and probe.https_enabled is False:
+        return "enable_https"
     if not trusted:
         return "trust_off"
-    if not startup_host:
+    if startup_host != probe.name:
         return "restart_gateway"
     if published is True:
         return "ready"
@@ -194,6 +206,16 @@ def _audit(request: web.Request, operation: str, outcome: str, resources: str) -
         logger.debug("tailnet mobile audit write failed", exc_info=True)
 
 
+async def _audit_async(
+    request: web.Request,
+    operation: str,
+    outcome: str,
+    resources: str,
+) -> None:
+    """Write SEL records off-loop, including the first cold initialization."""
+    await asyncio.to_thread(_audit, request, operation, outcome, resources)
+
+
 async def api_tailnet_mobile_status(request: web.Request) -> web.Response:
     """GET /api/tailnet/mobile — the guided state for the mobile-access card.
 
@@ -216,7 +238,7 @@ async def api_tailnet_mobile_status(request: web.Request) -> web.Response:
         # someone without owner rights reaching for this machine's network facts,
         # which is exactly the kind of event the SEL exists to carry. Mirrors the
         # denial audits the four mutating handlers already emit.
-        _audit(request, "tailnet.mobile.status", "denied", "not-owner")
+        await _audit_async(request, "tailnet.mobile.status", "denied", "not-owner")
         return web.json_response(
             {"error": "tailnet mobile access is owner-only", "code": "owner_only"},
             status=403,
@@ -238,7 +260,7 @@ async def api_tailnet_mobile_status(request: web.Request) -> web.Response:
             "peer_count": probe.peer_count,
             "peers_online": probe.peers_online,
             "trusted": live.trusted,
-            "startup_trusted": bool(live.startup_host),
+            "startup_trusted": live.startup_host == probe.name,
             "published": live.published,
             "keep_awake": live.keep_awake,
             "governance_pinned": live.pinned,
@@ -366,8 +388,8 @@ _QR_REFUSALS: dict[Step, tuple[str, str]] = {
     ),
     "restart_gateway": (
         "restart_required",
-        "This server resolved no tailnet name when it started, so it does not "
-        "trust that name yet. Restart Kiro Crew, then scan.",
+        "This running server has not loaded its validated tailnet origin yet. "
+        "Restart Kiro Crew, then scan.",
     ),
     "publish": (
         "not_published",
@@ -383,6 +405,11 @@ _QR_REFUSALS.update(
         "start_daemon": _QR_REFUSALS["install"],
         "sign_in": _QR_REFUSALS["install"],
         "enable_magicdns": _QR_REFUSALS["install"],
+        "enable_https": (
+            "https_not_enabled",
+            "This tailnet has not enabled HTTPS certificate provisioning for "
+            "this machine, so a phone could not open a secure dashboard URL.",
+        ),
         "occupied": _QR_REFUSALS["publish"],
     }
 )
@@ -457,11 +484,11 @@ async def api_tailnet_mobile_publish(request: web.Request) -> web.Response:
     """
     refusal = _guard(request)
     if refusal is not None:
-        _audit(request, "tailnet.mobile.publish", "denied", "restricted-session")
+        await _audit_async(request, "tailnet.mobile.publish", "denied", "restricted-session")
         return refusal
     port = _dashboard_port(request)
     if not port:
-        _audit(request, "tailnet.mobile.publish", "denied", "unknown-port")
+        await _audit_async(request, "tailnet.mobile.publish", "denied", "unknown-port")
         return web.json_response(
             {
                 "ok": False,
@@ -477,7 +504,7 @@ async def api_tailnet_mobile_publish(request: web.Request) -> web.Response:
     result = await asyncio.to_thread(
         tailnet_serve.publish, port, audit_tool="tailnet_mobile_publish"
     )
-    _audit(
+    await _audit_async(
         request,
         "tailnet.mobile.publish",
         "success" if result.ok else "denied",
@@ -509,11 +536,11 @@ async def api_tailnet_mobile_unpublish(request: web.Request) -> web.Response:
     """
     refusal = _guard(request)
     if refusal is not None:
-        _audit(request, "tailnet.mobile.unpublish", "denied", "restricted-session")
+        await _audit_async(request, "tailnet.mobile.unpublish", "denied", "restricted-session")
         return refusal
     port = _dashboard_port(request)
     result = await asyncio.to_thread(tailnet_serve.unpublish, port)
-    _audit(
+    await _audit_async(
         request,
         "tailnet.mobile.unpublish",
         "success" if result.ok else "denied",
@@ -555,7 +582,7 @@ async def api_tailnet_mobile_qr(request: web.Request) -> web.Response:
     """
     refusal = _guard(request)
     if refusal is not None:
-        _audit(request, "tailnet.mobile.qr", "denied", "restricted-session")
+        await _audit_async(request, "tailnet.mobile.qr", "denied", "restricted-session")
         return refusal
 
     port = _dashboard_port(request)
@@ -567,7 +594,7 @@ async def api_tailnet_mobile_qr(request: web.Request) -> web.Response:
     # `publish` already refuses at port 0; the two must not disagree about
     # whether an unknown port is safe.
     if not port:
-        _audit(request, "tailnet.mobile.qr", "denied", "unknown-port")
+        await _audit_async(request, "tailnet.mobile.qr", "denied", "unknown-port")
         return web.json_response(
             {
                 "error": (
@@ -595,7 +622,7 @@ async def api_tailnet_mobile_qr(request: web.Request) -> web.Response:
             # pins that), but a future step must fail CLOSED here rather than mint.
             ("not_ready", "This machine is not ready to hand the dashboard to a phone."),
         )
-        _audit(request, "tailnet.mobile.qr", "denied", f"step={live.step}")
+        await _audit_async(request, "tailnet.mobile.qr", "denied", f"step={live.step}")
         detail = live.serve_detail or live.probe.detail
         return web.json_response(
             {"error": f"{sentence} {detail}".strip() if detail else sentence, "code": code},
@@ -621,29 +648,71 @@ async def api_tailnet_mobile_qr(request: web.Request) -> web.Response:
 
     state_obj = request.app.get("state")
     owner_id = str(getattr(state_obj, "owner_id", "") or "")
-    # ``no_refresh`` is what makes the TTL above a real ceiling rather than a
-    # starting value. Without it the phone's session picks up a refresh cookie at
-    # the token->session exchange, and one rotation through ``api_auth_refresh``
-    # re-mints at MAX_SESSION_TTL_SECS — promoting this deliberately short window
-    # to the 20-hour cap. The claim is honoured in ``token_auth``'s exchange by
-    # never issuing the refresh chain, so the phone's session simply ends when
-    # ``session_exp`` does and the operator re-scans.
-    token = generate_token(owner_id or "local-app", ttl_seconds=ttl, extra={"no_refresh": "1"})
+    # Two session shapes; the operator picks which by configuration. Both bound
+    # the credential — they differ in WHAT bounds it.
+    # Default — ``boot``: the session is scoped to this gateway PROCESS. The
+    # refresh chain IS issued, so being idle no longer signs the phone out, and
+    # both the access cookie and the chain carry the boot id, so a restart does.
+    # This is the default because it matches what handing a phone a QR code
+    # actually means: signed in while my gateway is up. A clock the operator
+    # cannot see, which signs the phone out mid-use and yet keeps working after
+    # the gateway is gone, matches nothing anyone asked for.
+    #
+    # It is a DIFFERENT bound, not a strictly tighter one: a gateway with long
+    # uptime grants a correspondingly long session. What keeps that honest is
+    # that the bound is something the operator can see and act on — `uptime`
+    # answers "is my phone still signed in", and a restart is a hard revoke
+    # needing no recorded state. The peer pin, the revocation counter and
+    # `kirocrew logout` all still apply unchanged.
+    #
+    # Opt out — ``no_refresh``: no refresh chain is issued at the exchange, so
+    # ``session_exp`` becomes a real ceiling and the phone re-scans when it
+    # lapses. Kept as a supported shape for an operator who wants the credential
+    # bounded by a clock regardless of process lifetime.
+    #
+    # Mutually exclusive on purpose: carrying both would mean a session that
+    # neither refreshes nor lasts, which is worse than either.
+    #
+    # The TTL clamp above is untouched under both shapes. Rotation is what
+    # extends a boot-bound session, so no ceiling and no security constant moves.
+    # Read the session-shape choice here rather than widening ``_live_state``'s
+    # tuple, which the status endpoint also consumes.
+    #
+    # An unreadable config falls back to the DEFAULT, not to the other shape.
+    # "We could not read your override, so use the default" is the honest
+    # reading; picking the timed shape instead would hand the phone a session
+    # that expires on a clock the operator did not ask for, which presents as a
+    # phone that randomly signs itself out. The fallback is not unbounded
+    # either — a boot-bound session still ends at the next restart.
+    try:
+        _cfg = await asyncio.to_thread(KiroCrewConfig.load)
+        _until_restart = bool(_cfg.dashboard.qr_session_until_restart)
+    except Exception:
+        logger.debug("tailnet mobile: config unreadable for session shape", exc_info=True)
+        _until_restart = True
+
+    if _until_restart:
+        claims = {"boot": current_boot_id()}
+    else:
+        claims = {"no_refresh": "1"}
+    token = generate_token(owner_id or "local-app", ttl_seconds=ttl, extra=claims)
     url = f"https://{host}/?token={token}"
     try:
 
         image = await asyncio.to_thread(render_qr_data_uri, url)
-    except Exception as exc:
+    except Exception:
         logger.debug("tailnet mobile QR encode failed", exc_info=True)
-        _audit(request, "tailnet.mobile.qr", "denied", "encode-failed")
+        await _audit_async(request, "tailnet.mobile.qr", "denied", "encode-failed")
+        # Detail is in the server log above; the client body (rendered verbatim
+        # into a localized UI) gets a generic message.
         return web.json_response(
             {
-                "error": f"Could not render the QR code: {exc}",
+                "error": "Could not render the QR code",
                 "code": "encode_failed",
             },
             status=500,
         )
-    _audit(request, "tailnet.mobile.qr", "success", f"ttl={ttl}")
+    await _audit_async(request, "tailnet.mobile.qr", "success", f"ttl={ttl}")
     return web.json_response(
         {
             "url": url,
