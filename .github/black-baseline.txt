@@ -437,7 +437,6 @@ test/test_acp_liveness.py
 test/test_acp_metadata_fields.py
 test/test_acp_offload.py
 test/test_acp_prompt_blocks.py
-test/test_acp_set_mode_all_agents.py
 test/test_acp_spawn_offload.py
 test/test_acp_stale_recovery.py
 test/test_acp_tool_identity.py
