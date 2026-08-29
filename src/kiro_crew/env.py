@@ -874,7 +874,7 @@ def mcp_search_path(env_path: str) -> str:
 #
 # * ``LD_*`` / ``DYLD_*`` are dynamic-loader channels honoured by every
 #   ELF/Mach-O binary in the spawn chain, the sandbox wrapper included.
-# * The listed ``PYTHON*`` keys matter because Kiro Crew's Linux sandbox launcher
+# * The ``PYTHON`` namespace matters because Kiro Crew's Linux sandbox launcher
 #   IS a Python process: ``sandbox.namespace_argv`` returns
 #   ``[sys.executable, "-I", "-S", <generated script>, *argv]`` (sandbox.py), and
 #   that interpreter starts with the env we hand ``Popen``. A declared
@@ -884,13 +884,35 @@ def mcp_search_path(env_path: str) -> str:
 #   ``PYTHONUSERBASE`` is too: it relocates user-site, whose ``.pth`` files are
 #   EXECUTED during startup.
 #
-# NOTE this list is a prefix set, not the glob ``PYTHON*`` — do not describe it as
-# such. It does not cover ``HOME``, which also derives the user-site path when
-# ``PYTHONUSERBASE`` is unset, and stripping ``HOME`` from a spec overlay would
-# break servers that legitimately need it. The launcher's ``-I -S`` is what
+# NOTE the ``PYTHON`` entry covers that whole namespace by prefix, but this is
+# still a PREFIX set rather than a general glob: it does not cover ``HOME``,
+# which also derives the user-site path when ``PYTHONUSERBASE`` is unset, and
+# stripping ``HOME`` from a spec overlay would break servers that legitimately
+# need it. The launcher's ``-I -S`` is what
 # actually closes that class (site processing never happens, so no ``.pth`` runs
 # whatever the paths point at); these prefixes are defense in depth for it and the
 # primary control for any future launcher that forgets those flags.
+#
+# ``PYTHON`` is denied as a NAMESPACE, not as a list of the dangerous names in
+# it, for the same reason ``KIROCREW_`` is below: an enumeration cannot cover the
+# variable nobody has added yet. ``python3 --help-env`` documents 29 ``PYTHON*``
+# variables on 3.12 alone, plus platform-only spellings like
+# ``PYTHONEXECUTABLE``, and several are execution channels rather than
+# preferences -- ``PYTHONPATH`` places a ``sitecustomize`` module,
+# ``PYTHONSTARTUP`` names a file, ``PYTHONBREAKPOINT`` takes a dotted callable
+# and imports it, ``PYTHONWARNINGS`` resolves a dotted filter category through
+# ``warnings._getcategory``'s ``__import__``, ``PYTHONHOME`` and
+# ``PYTHONPLATLIBDIR`` move where the standard library is found. Naming them
+# one at a time was tried and did not converge: this set reached six entries by
+# accretion while 23 documented siblings stayed open.
+#
+# The cost is a benign ``PYTHON*`` variable in a spec being refused --
+# ``PYTHONUNBUFFERED=1`` on a user's own Python MCP server is the realistic
+# example. That is a logged refusal rather than a broken server (see the
+# asymmetry note below), and ``denied_spec_env_keys`` names the key so the probe
+# explains itself instead of reading as a bug. Every first-party ``PYTHON*`` use
+# in this tree sets the variable directly on a child process rather than
+# declaring it in a spec ``env``, so none of them route through here.
 #
 # Prefix-matched, case-insensitively (Windows env is case-insensitive).
 #
@@ -906,10 +928,7 @@ def mcp_search_path(env_path: str) -> str:
 _SPEC_ENV_DENIED_PREFIXES: tuple[str, ...] = (
     "LD_",
     "DYLD_",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "PYTHONSTARTUP",
-    "PYTHONUSERBASE",
+    "PYTHON",
 )
 
 # The env namespace Kiro Crew reserves for ITSELF. A spec-declared ``env`` may
@@ -962,10 +981,24 @@ _SPEC_ENV_RESERVED_PREFIXES: tuple[str, ...] = ("KIROCREW_",)
 def sanitize_spec_env(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
     """Drop loader-injection and reserved-namespace keys from a spec env.
 
-    For spawn paths that apply a config-declared ``env`` to a child THEY
-    launch (the probe). The declared env is config-file
-    text — the same trust level as the command itself, which those paths
-    already refuse to run unsandboxed — so a key that executes code in the
+    For paths that let a config-declared ``env`` reach a child process. Two
+    shapes qualify and both are covered: a spawn path that launches the child
+    ITSELF (the probe), and a path that EMITS the env into an agent spec for
+    ``kiro-cli`` to launch from (``agent._enforce_managed_mcp_ownership``, for
+    a managed server's entry merged out of the agent-writable
+    ``agent.json``). The launcher's identity does not change the argument --
+    what matters is that config-file text becomes a child's environment.
+
+    That second caller does NOT disturb the ``emit_env`` asymmetry noted above.
+    The asymmetry protects a USER'S OWN Python MCP server, which may
+    legitimately be configured through ``env.PYTHONPATH``; the managed
+    population is ours, its ``command``/``args`` are ours, and it runs as the
+    entry point holding the internal API secret, so no declared loader or
+    namespace variable on it is legitimate in the first place.
+
+    The declared env is config-file
+    text -- the same trust level as the command itself, which those paths
+    already refuse to run unsandboxed -- so a key that executes code in the
     launcher before confinement is established must not pass through.
 
     Two independent classes are dropped, for two different reasons:
@@ -993,9 +1026,33 @@ def sanitize_spec_env(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
     Dropped keys are logged at WARNING: a spec relying on one is broken by
     policy, not by accident, and silence would read as the credential-drop
     bug this sanitizer's caller exists to fix.
+
+    An entry whose key or value is not a string is dropped for a different
+    reason -- not policy but type. The signature promises ``str -> str`` and
+    every caller builds ``pairs`` from parsed JSON, so without this the
+    ill-typed value reaches an emitted spec whose schema is a string map.
     """
     out: dict[str, str] = {}
     for key, value in pairs:
+        # Honor this function's own str -> str signature. Every caller builds
+        # `pairs` from parsed JSON, where a value may be any JSON type, so an
+        # `env` of {"PORT": 3000} would otherwise be copied through into an
+        # emitted spec whose schema is a string map -- and a spec kiro-cli
+        # rejects costs the user every Crew MCP tool, from one mistyped config
+        # value. Dropped rather than coerced with str(), matching how a
+        # malformed non-dict `env` is dropped by the managed-entry caller: a
+        # value we invent is not the one the user wrote. A non-string KEY is
+        # unreachable from JSON (object keys are always strings) but would
+        # crash `key.upper()` below, so it is guarded in the same place.
+        if not isinstance(key, str) or not isinstance(value, str):
+            logger.warning(
+                "dropping spec env entry %r: keys and values must be strings, got "
+                "key %s and value %s",
+                key,
+                type(key).__name__,
+                type(value).__name__,
+            )
+            continue
         folded = key.upper()
         if any(folded.startswith(p) for p in _SPEC_ENV_DENIED_PREFIXES):
             logger.warning(
