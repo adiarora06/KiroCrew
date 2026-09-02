@@ -69,7 +69,22 @@ class CronHistoryStore:
         cron_max_index_records: int = _MAX_INDEX_RECORDS,
     ):
         self._dir = (base_dir or config_dir()) / "cron-history"
-        self._dir.mkdir(parents=True, exist_ok=True)
+        # NOT created here. `cron-history` is one of `sandbox.py`'s
+        # `_CREW_HIDDEN_LEAVES` -- bind-masked on Linux and read+write-denied by
+        # Seatbelt on macOS, because no in-sandbox reader is supposed to touch it.
+        # `mcp_cron.py` nonetheless constructs a `CronService` (and therefore a
+        # `CronHistoryStore`) on every tool call, including pure reads like
+        # `cron_list`/`cron_status`, so an eager mkdir here ran unconditionally
+        # inside the sandbox against a path the OS gate masks -- harmless on
+        # Linux (the bind mount pre-creates the target, so `exist_ok=True`
+        # swallows it), but a `PermissionError` under a properly enforced
+        # Seatbelt deny would propagate and take down every `mcp_cron` tool.
+        # `_lock()` below creates the directory lazily, immediately before the
+        # one thing that actually needs it to exist -- a real write -- mirroring
+        # `webhooks.py`'s `locked()`, which defers its own masked-leaf mkdir the
+        # same way. Every read method here already tolerates a missing
+        # directory/file via `Path.exists()`, so construction and reads no
+        # longer touch the filesystem at all.
         self._index_path = self._dir / "_index.jsonl"
         self._summary_cap = cron_summary_cap
         self._trace_cap = cron_trace_cap_kb * 1024
@@ -86,7 +101,15 @@ class CronHistoryStore:
         return self._dir / ".history.lock"
 
     def _lock(self) -> int:
-        """Acquire advisory lock, return fd."""
+        """Acquire advisory lock, return fd.
+
+        Only the write paths (``_append_sync``, ``_rotate_sync``,
+        ``_rotate_all_sync``, ``_delete_job_history_sync``) call this, so the
+        directory is created here, lazily, rather than in ``__init__`` -- see
+        the comment there for why construction must not touch this masked
+        path.
+        """
+        self._dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self._lock_path()), os.O_WRONLY | os.O_CREAT, 0o600)
         platform_compat.acquire_lock(fd, exclusive=True)
         return fd

@@ -224,6 +224,67 @@ async def test_delete_nonexistent_returns_false(store: CronHistoryStore) -> None
     assert await store.delete_job_history("nope") is False
 
 
+# ── construction must not touch the (sandbox-masked) directory ──────────
+#
+# `cron-history` is HIDDEN under sandbox.py's `_CREW_HIDDEN_LEAVES` (see
+# issue #7742 / PR #7439): no in-sandbox reader is supposed to touch it, yet
+# `mcp_cron.py` constructs a fresh `CronService` -> `CronHistoryStore` on
+# every tool call, including pure reads. An eager `mkdir` in `__init__` ran
+# unconditionally against that masked path from inside the sandbox -- a
+# no-op on Linux (bind-mount pre-creates the target) but a live risk of an
+# uncaught `PermissionError` under a properly enforced macOS Seatbelt deny.
+# These pin the directory creation to the one place that actually needs it:
+# an in-flight write.
+
+
+def test_construction_does_not_create_directory(tmp_path: Path) -> None:
+    """Merely instantiating the store must not touch the filesystem.
+
+    A masked/read-denied `base_dir` (e.g. under a Seatbelt deny on macOS)
+    must not raise just because a caller built a `CronHistoryStore` -- most
+    callers (every `mcp_cron` tool invocation) never read or write history at
+    all.
+    """
+    target = tmp_path / "cron-history"
+    CronHistoryStore(base_dir=tmp_path)
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_pure_reads_do_not_create_directory(store: CronHistoryStore, tmp_path: Path) -> None:
+    """Read-only calls on a store with no history yet must not create the dir.
+
+    Every read method already tolerates a missing directory via
+    `Path.exists()`; this pins that they never fall back to creating one.
+    """
+    target = tmp_path / "cron-history"
+
+    records, total = await store.get_job_history("job1")
+    assert (records, total) == ([], 0)
+    assert not target.exists()
+
+    records, total = await store.get_all_history()
+    assert (records, total) == ([], 0)
+    assert not target.exists()
+
+    assert await store.get_run_detail("job1", "run1") is None
+    assert not target.exists()
+
+    await store.rotate("job1")  # short-circuits on a missing job file
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_append_creates_directory_lazily(store: CronHistoryStore, tmp_path: Path) -> None:
+    """The first real write is what creates the directory, not construction."""
+    target = tmp_path / "cron-history"
+    assert not target.exists()
+
+    await store.append(_record())
+
+    assert target.is_dir()
+
+
 # ── path traversal ───────────────────────────────────────────────────────
 
 
