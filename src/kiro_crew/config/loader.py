@@ -3261,7 +3261,24 @@ class KiroCrewConfig:
 
             if needs_migration and not cfg._degraded_sections:
                 _write_migration_backup(path)
-                cfg.save()
+                # Pass the ticket drawn BEFORE this method's read (see the top
+                # of this function and next_config_load_ticket) rather than
+                # letting save() draw a fresh one. cfg is a snapshot from that
+                # earlier read; a concurrent dashboard PATCH or CLI write that
+                # has since saved a NEWER config carries a higher ticket, and
+                # save() drops this write rather than clobbering it with the
+                # stale snapshot. Migration is one-shot but idempotent: a
+                # dropped write just means this process's on-disk config
+                # stays in its legacy shape, and the NEXT load — whether of
+                # the concurrent write above or a later one — re-detects and
+                # retries.
+                if not cfg.save(ticket=ticket):
+                    logger.info(
+                        "config: write-back migration skipped — a concurrent "
+                        "config write landed after this load's read; writing "
+                        "back this stale snapshot would have discarded it. "
+                        "Retried on the next load."
+                    )
             elif needs_migration:
                 # This load DISCARDED something (a malformed section, an
                 # unreadable file). cfg.save() serializes only the parsed
@@ -3364,7 +3381,7 @@ class KiroCrewConfig:
         slack_section["observe_ttl_hours"] = self.observe_ttl_hours
         return d
 
-    def save(self) -> None:
+    def save(self, ticket: int | None = None) -> bool:
         """Write current config to ~/.kiro/crew/config.json.
 
         Stamps a ``meta`` block with the current version and timestamp
@@ -3372,7 +3389,27 @@ class KiroCrewConfig:
 
         Values that exist in ``config.local.json`` are stripped from the
         output to prevent overlay settings from leaking into the base file.
+
+        *ticket* orders this write against a concurrent one the same way
+        :func:`publish_autocompact_pct` orders its publish: pass the ticket
+        drawn from :func:`next_config_load_ticket` BEFORE the read that
+        produced this config, and if a save carrying a higher ticket has
+        already landed, THIS write is dropped -- returns ``False`` -- rather
+        than clobbering it with a stale snapshot.
+
+        Omitting *ticket* draws a fresh one, which therefore always wins.
+        That is correct for the overwhelmingly common caller: read, mutate,
+        save, all in one go, nothing else could have raced it into being
+        "newer". Only a caller REPLAYING an earlier read across a gap where
+        something else may have saved in the meantime -- currently just the
+        write-back migration in ``_load_resolved`` -- needs to pass the
+        ticket it drew before that read, so a concurrent write landing in the
+        gap survives instead of being silently overwritten.
+
+        Returns ``True`` if the write happened, ``False`` if it was dropped
+        as stale.
         """
+        global _CONFIG_WRITE_TICKET
 
         d = self.to_dict()
 
@@ -3405,14 +3442,28 @@ class KiroCrewConfig:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        # Atomic + mode-preserving: a concurrent reader must never observe a
-        # half-written config, and the write must not widen who can read a file
-        # that may hold inline credentials. See write_config_atomically.
-        write_config_atomically(config_path(), stamp_config_meta(d))
+        # Compare-and-write-and-record under one lock, same reasoning as
+        # publish_autocompact_pct: splitting the compare from the record would
+        # let two concurrent saves both pass the comparison and race the
+        # write, so whichever's write_config_atomically call finishes LAST
+        # would win regardless of ticket order. Drawn OUTSIDE any lock we
+        # already hold -- next_config_load_ticket takes its own, disjoint
+        # lock, so there is no reentrancy hazard in acquiring it here.
+        my_ticket = ticket if ticket is not None else next_config_load_ticket()
+        with _CONFIG_WRITE_TICKET_LOCK:
+            if my_ticket < _CONFIG_WRITE_TICKET:
+                return False
+            # Atomic + mode-preserving: a concurrent reader must never observe
+            # a half-written config, and the write must not widen who can
+            # read a file that may hold inline credentials. See
+            # write_config_atomically.
+            write_config_atomically(config_path(), stamp_config_meta(d))
+            _CONFIG_WRITE_TICKET = my_ticket
         # Drop the validated-data cache so the next load() re-reads this write.
         # mtime-keying already detects the change; this makes it immediate even
         # if the filesystem mtime resolution is coarse.
         _invalidate_config_cache()
+        return True
 
     @staticmethod
     def _resolve_agent_model() -> str:
@@ -4295,6 +4346,25 @@ def publish_autocompact_pct(config: "KiroCrewConfig", ticket: int | None = None)
 def published_autocompact_pct() -> float:
     """The published compaction threshold."""
     return _CONFIG_AUTOCOMPACT_PCT
+
+
+#: Highest ticket associated with a config.json write that has actually landed
+#: on disk, via :meth:`KiroCrewConfig.save`. Same ordering contract as
+#: :data:`_CONFIG_AUTOCOMPACT_TICKET` -- a ticket lower than this one is a
+#: write whose read started before a write that has already landed, so
+#: applying it would clobber that later write -- but this one guards a real
+#: file, not an in-memory rebind. Only ``save()``'s write-back migration
+#: caller (:meth:`KiroCrewConfig._load_resolved`) currently passes an
+#: explicit ticket; every other caller reads, mutates, and saves in one go,
+#: so it draws a fresh one at write time and always wins (see ``save``).
+_CONFIG_WRITE_TICKET: int = 0
+
+#: Serializes the compare-and-write-and-record inside :meth:`KiroCrewConfig.save`
+#: into one atomic step, the same way :data:`_CONFIG_AUTOCOMPACT_LOCK` serializes
+#: the compact/publish compare-and-set. Without it, two concurrent ``save()``
+#: calls could both pass the ticket comparison before either records its
+#: ticket, and whichever writes last would win regardless of ticket order.
+_CONFIG_WRITE_TICKET_LOCK = threading.Lock()
 
 
 def resolve_effective_agent(agent_name: str | None, project_dir: str | None = None) -> str:

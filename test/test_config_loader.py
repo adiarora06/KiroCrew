@@ -5715,6 +5715,186 @@ class TestMigrationBackupContainment:
         assert not (home / "config.json.bak").exists()
 
 
+class TestMigrationSaveOrderingAgainstConcurrentWrites:
+    """Regression tests for #7793.
+
+    The write-back migration ``cfg.save()`` inside ``_load_resolved`` used to
+    fire unconditionally: ``cfg`` is a snapshot from a read earlier in the same
+    call, so a concurrent config write (a dashboard PATCH, a CLI write, another
+    process's load) landing between that read and this save was silently
+    discarded when the migration write finished last.
+
+    The fix reuses the ticket-ordering contract ``publish_autocompact_pct``
+    already established for this exact class of problem: ``_load_resolved``
+    passes the ticket it drew BEFORE its read into ``cfg.save(ticket=...)``,
+    and ``save()`` drops a write whose ticket is lower than one already
+    recorded rather than clobbering it.
+    """
+
+    # A config with neither "agents" nor "default_agent" is what makes load()
+    # take the migration write-back branch (see TestMigrationBackupContainment).
+    _LEGACY = {"telegram": {"allow_forum": True}}
+
+    def test_concurrent_write_between_read_and_migration_save_survives(
+        self, tmp_path: Path
+    ) -> None:
+        """Pins the exact race from the issue.
+
+        1. A load reads a legacy config and decides it needs migration.
+        2. Before its ``cfg.save()`` write-back fires, a concurrent write --
+           modeled the way a real dashboard PATCH handler writes: its own
+           ``load()`` + mutate + ``save()`` -- lands and saves a newer config.
+        3. The migrating load's write-back must then be DROPPED rather than
+           clobbering the concurrent write with its now-stale snapshot.
+
+        ``_write_migration_backup`` is the last thing ``_load_resolved`` calls
+        before ``cfg.save()``, so patching it to perform the concurrent write
+        lands that write deterministically inside the race window instead of
+        depending on thread scheduling.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        cfg_file = home / "config.json"
+        cfg_file.write_text(json.dumps(self._LEGACY), encoding="utf-8")
+
+        real_backup = loader_module._write_migration_backup
+
+        def _backup_then_concurrent_write(path: Path) -> None:
+            real_backup(path)
+            # The concurrent writer: reads the (still legacy-shaped) file,
+            # changes one field, and saves -- exactly the read/mutate/save
+            # shape every dashboard handler and CLI command uses.
+            concurrent_cfg = KiroCrewConfig.load()
+            concurrent_cfg.dashboard.theme_mode = "dark"
+            assert concurrent_cfg.save(), "the concurrent write itself must land"
+
+        with (
+            unittest.mock.patch("kiro_crew.config.loader.config_dir", return_value=home),
+            unittest.mock.patch("kiro_crew.config.loader.config_path", return_value=cfg_file),
+            unittest.mock.patch(
+                "kiro_crew.config.loader._write_migration_backup",
+                side_effect=_backup_then_concurrent_write,
+            ),
+        ):
+            cfg = KiroCrewConfig.load()
+
+        # Guard the guard: the migrating load's in-memory result still carries
+        # the migration (only the DISK write is gated), otherwise this test
+        # would pass for the wrong reason if the branch stopped firing.
+        assert cfg.agents, "migration write-back branch did not run, test is vacuous"
+
+        on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert (
+            on_disk.get("dashboard", {}).get("theme_mode") == "dark"
+        ), "the concurrent write was discarded by the stale migration save"
+
+    def test_save_with_a_stale_ticket_is_dropped(self, tmp_path: Path) -> None:
+        """The ticket contract in isolation, without going through load().
+
+        A save() carrying a ticket lower than one already recorded must leave
+        the newer write's content on disk untouched -- matching
+        publish_autocompact_pct's "a ticket lower than the one already
+        published is dropped" contract.
+
+        Tickets are DRAWN, not hardcoded: next_config_load_ticket() is a
+        single monotonic counter shared with every other load() in this test
+        process, so a literal like ``5`` could already be behind
+        ``_CONFIG_WRITE_TICKET`` by the time this test runs. Drawing the stale
+        ticket strictly before the fresh one guarantees stale < fresh
+        regardless of how many tickets earlier tests issued.
+        """
+        from kiro_crew.config.loader import next_config_load_ticket
+
+        cfg_file = tmp_path / "config.json"
+
+        with (
+            unittest.mock.patch("kiro_crew.config.loader.config_dir", return_value=tmp_path),
+            unittest.mock.patch("kiro_crew.config.loader.config_path", return_value=cfg_file),
+        ):
+            stale_ticket = next_config_load_ticket()
+            fresh_ticket = next_config_load_ticket()
+
+            fresh = KiroCrewConfig()
+            fresh.dashboard.theme_mode = "fresh"
+            stale = KiroCrewConfig()
+            stale.dashboard.theme_mode = "stale"
+
+            assert fresh.save(ticket=fresh_ticket) is True
+            assert stale.save(ticket=stale_ticket) is False, "a lower ticket must be dropped"
+
+            on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
+            assert on_disk["dashboard"]["theme_mode"] == "fresh"
+
+    def test_concurrent_migration_saves_never_let_an_older_ticket_win(self, tmp_path: Path) -> None:
+        """The compare-and-write-and-record must be atomic across threads.
+
+        Mirrors test_autocompact_default.test_concurrent_publishes_never_let_
+        an_older_ticket_win: a compare followed by a separate write+record
+        would let two concurrent saves both pass the comparison and race the
+        actual write, so whichever finishes LAST wins regardless of ticket
+        order. Interleaving is forced here rather than hoped for: a stalled
+        lock parks the low-ticket writer inside its critical section while
+        the high-ticket writer completes first.
+        """
+        import threading
+
+        from kiro_crew.config.loader import next_config_load_ticket
+
+        cfg_file = tmp_path / "config.json"
+        # Drawn in order, so low_ticket < high_ticket by construction --
+        # see test_save_with_a_stale_ticket_is_dropped for why literals aren't
+        # safe here.
+        low_ticket = next_config_load_ticket()
+        high_ticket = next_config_load_ticket()
+        low = KiroCrewConfig()
+        low.dashboard.theme_mode = "low"
+        high = KiroCrewConfig()
+        high.dashboard.theme_mode = "high"
+
+        entered = threading.Event()
+        release = threading.Event()
+        real_lock = loader_module._CONFIG_WRITE_TICKET_LOCK
+
+        class _StallOnce:
+            """Lock stand-in that parks the FIRST holder inside the critical section."""
+
+            def __init__(self) -> None:
+                self._first = True
+
+            def __enter__(self):
+                real_lock.acquire()
+                if self._first:
+                    self._first = False
+                    entered.set()
+                    release.wait(timeout=5)
+                return self
+
+            def __exit__(self, *exc) -> None:
+                real_lock.release()
+
+        with (
+            unittest.mock.patch("kiro_crew.config.loader.config_dir", return_value=tmp_path),
+            unittest.mock.patch("kiro_crew.config.loader.config_path", return_value=cfg_file),
+        ):
+            try:
+                loader_module._CONFIG_WRITE_TICKET_LOCK = _StallOnce()
+                t_low = threading.Thread(target=low.save, kwargs={"ticket": low_ticket})
+                t_low.start()
+                assert entered.wait(timeout=5), "the first (low-ticket) writer never entered"
+
+                t_high = threading.Thread(target=high.save, kwargs={"ticket": high_ticket})
+                t_high.start()
+                release.set()
+                t_low.join(timeout=5)
+                t_high.join(timeout=5)
+            finally:
+                loader_module._CONFIG_WRITE_TICKET_LOCK = real_lock
+
+        on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert on_disk["dashboard"]["theme_mode"] == "high", "the newer ticket must win"
+        assert loader_module._CONFIG_WRITE_TICKET == high_ticket
+
+
 # Transports carrying a soft/hard context-threshold pair, and those carrying
 # only the soft nudge (their hard backstop is the backend autocompactor).
 # A future transport that forgets _threshold_pct / _normalize_threshold_pair
