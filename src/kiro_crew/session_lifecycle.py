@@ -48,6 +48,7 @@ class _SessionEntry(Protocol):
     first_turn: object
     retire_on_identity_change: bool
     prev_turn_cancelled: bool
+    queue: deque[tuple[str, str, dict[str, Any]]]
 
 
 class _SessionMapPort(Protocol):
@@ -429,7 +430,7 @@ class SessionLifecycleService:
             # for this key picks them up instead of losing them with the
             # session object. Reuses the deque directly -- the session being
             # discarded has no other use for it.
-            rescued_queue = bool(session is not None and session.queue)
+            rescued_queue = session is not None and bool(session.queue)
             if session is not None and session.queue:
                 self._orphaned_queues[key] = session.queue
         if clear_conversation and session is not None:
