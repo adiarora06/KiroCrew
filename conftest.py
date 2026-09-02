@@ -1464,8 +1464,10 @@ def _isolate_tempfile_base(tmp_path_factory):
     can both NAME it (residue is still a defect) and REMOVE it (so the accumulation stops
     regardless of whether anyone acts on the report).
 
-    The report WARNS by default and fails only under ``KIROCREW_TMP_RESIDUE_STRICT`` --
-    see ``_TMP_RESIDUE_STRICT_ENV`` for why that is a staged rollout and not a shrug.
+    Directory residue fails by default on Linux and macOS, while Windows retains a
+    staged warning until its existing anonymous directory leaks are attributed. File
+    residue warns by default on every platform. ``KIROCREW_TMP_RESIDUE_STRICT`` makes
+    every residue class fatal; see ``_TMP_RESIDUE_STRICT_ENV`` for the rollout rationale.
 
     Under ``-n auto`` each xdist worker is its own process, so each gets its own
     root and reports only its own leaks; the controller runs no tests and creates
