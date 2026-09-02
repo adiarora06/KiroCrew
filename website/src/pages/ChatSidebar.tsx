@@ -152,20 +152,17 @@ const ROW_ICON_PX = 10
  *  keeps one identity while the query has no data. */
 const NO_TAGS: ChatTag[] = []
 
-/** Translate a slot's running-status line. The websocket layer (a plain `.ts`
- *  module that cannot call `useTranslation`) already localizes the two fixed
- *  phases' `label` via `i18nT()` at dispatch time — see the `chat_message`/
- *  `tool_call` cases in useWebSocket — so this re-runs the same lookup rather
- *  than storing (and comparing against) a raw English sentinel. A `tool` phase
- *  or a server-supplied status carries its own dynamic text and is passed
- *  through.
+/** Translate a slot's running-status line. Fixed phases are stored as
+ *  language-neutral `kind` markers and resolved here at render time, so a
+ *  language change updates an in-flight row immediately. A `tool` phase or a
+ *  server-supplied `status` carries dynamic text and is passed through.
  *
  *  A `tool` phase honors the user's `simplifiedToolNames` preference (purpose vs
  *  raw tool title) via toolStatusLabel, so the row agrees with the inline tool
  *  pill in the transcript rather than always showing the purpose. */
 function slotStatusText(detail: { kind?: string; label?: string; purpose?: string } | undefined, simplifiedToolNames: boolean, uiLang: string): string {
   if (detail?.kind === 'streaming') return i18nT('pages.chatSidebar.streaming')
-  if (detail?.kind === 'thinking' && detail.label === i18nT('pages.chatSidebar.thinking')) return i18nT('pages.chatSidebar.thinking')
+  if (detail?.kind === 'thinking') return i18nT('pages.chatSidebar.thinking')
   return toolStatusLabel(detail, simplifiedToolNames, uiLang) || i18nT('pages.chatSidebar.thinking')
 }
 

@@ -261,6 +261,15 @@ describe('sessionStatus — running detail', () => {
     })
   })
 
+  it('resolves fixed phase markers instead of rendering their stored label', () => {
+    expect(
+      sessionStatus(slot({ running: true }), [], { kind: 'thinking', label: 'stale locale text' }),
+    ).toMatchObject({ label: 'Thinking…' })
+    expect(
+      sessionStatus(slot({ running: true }), [], { kind: 'streaming', label: 'stale locale text' }),
+    ).toMatchObject({ label: 'Streaming' })
+  })
+
   it('shows the raw tool title when simplifiedToolNames is off', () => {
     // Same preference the inline tool pill obeys, so the palette row and the
     // transcript agree instead of the row always showing the purpose.

@@ -776,6 +776,7 @@ describe('useWebSocket frame router', () => {
       ws.simulateMessage({ type: 'chat_status', data: { slot: ACTIVE, status: 'Compacting…' } })
     })
     expect(chat().slotContextPct[ACTIVE]).toBe(42)
+    expect(chat().slotStatusDetail[ACTIVE]?.kind).toBe('status')
     expect(chat().slotStatusDetail[ACTIVE]?.label).toBe('Compacting…')
 
     // A status frame with no text is ignored rather than clearing the detail.
@@ -1784,4 +1785,3 @@ describe('useWebSocket slots reconcile', () => {
     expect(testStore.getState().chat.slotMessages[BACKGROUND]).toBeDefined()
   })
 })
-
