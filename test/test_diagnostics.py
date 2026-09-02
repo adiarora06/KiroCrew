@@ -340,6 +340,86 @@ def test_include_logs_false_excludes_gateway(tmp_path, monkeypatch):
         assert "versions.txt" in z.namelist()
 
 
+class TestKiroCliVersionProbe:
+    """Regression coverage for #7674.
+
+    ``_kiro_cli_version()`` used to spawn the bare name ``["kiro-cli",
+    "--version"]``, which resolves only through the collector process's own
+    inherited ``PATH``. A desktop app launched from Finder/Dock on macOS
+    inherits launchd's minimal ``PATH`` (no ``~/.local/bin``), so a perfectly
+    good install reported ``unavailable`` — indistinguishable from "not
+    installed" — even while the gateway ran the same binary via
+    ``resolve_kiro_cli()``.
+    """
+
+    def test_resolves_a_binary_absent_from_the_inherited_path(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The probe must find an install that only a fixed dir would surface.
+
+        ``kiro-cli`` lives in ``~/.local/bin`` — the first fixed entry
+        ``known_kiro_cli_dirs`` searches — while the inherited ``PATH`` is a
+        launchd-style minimal one that excludes it. A bare-name
+        ``["kiro-cli", ...]`` spawn would raise ``FileNotFoundError`` here;
+        going through ``resolve_kiro_cli()`` must still find it.
+        """
+        home = tmp_path / "home"
+        bin_dir = home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        fake = bin_dir / "kiro-cli"
+        fake.write_text("#!/bin/sh\necho 'kiro-cli 9.9.9'\n")
+        fake.chmod(0o755)
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("kiro_crew.kiro_cli.sys.platform", "linux")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")  # excludes bin_dir
+
+        assert diagnostics._kiro_cli_version() == "kiro-cli 9.9.9"
+
+    def test_reports_unavailable_only_when_the_resolver_finds_nothing(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Genuinely absent stays 'unavailable' — the resolver found no binary."""
+        home = tmp_path / "home"
+        home.mkdir()
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr("kiro_crew.kiro_cli.sys.platform", "linux")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+        assert diagnostics._kiro_cli_version() == "unavailable"
+
+    def test_resolved_binary_that_fails_to_run_is_not_reported_as_unavailable(
+        self, monkeypatch
+    ) -> None:
+        """A resolved-but-broken binary must not collapse onto 'unavailable'.
+
+        That string means "not installed" to a triage reader; a binary the
+        resolver found but that failed to execute is a different, more
+        actionable state.
+        """
+        monkeypatch.setattr(diagnostics, "resolve_kiro_cli", lambda: "/no/such/kiro-cli")
+
+        assert diagnostics._kiro_cli_version() == "present but not runnable"
+
+    def test_spawns_the_resolved_path_not_the_bare_name(self, monkeypatch) -> None:
+        """The probe must pass resolve_kiro_cli()'s absolute path to subprocess,
+        never the bare command name that only searches the inherited PATH."""
+        monkeypatch.setattr(
+            diagnostics, "resolve_kiro_cli", lambda: "/opt/kiro/kiro-cli"
+        )
+        seen: dict[str, object] = {}
+
+        def _fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return MagicMock(stdout="kiro-cli 1.2.3\n", stderr="")
+
+        monkeypatch.setattr(diagnostics.subprocess, "run", _fake_run)
+
+        assert diagnostics._kiro_cli_version() == "kiro-cli 1.2.3"
+        assert seen["argv"] == ["/opt/kiro/kiro-cli", "--version"]
+
+
 def test_issue_url_is_well_formed(tmp_path, monkeypatch):
     home = tmp_path / "home"
     _isolate(monkeypatch, home)

@@ -37,6 +37,7 @@ from urllib.parse import quote, urlencode
 
 from kiro_crew import __version__, release_channel
 from kiro_crew.config.loader import config_dir
+from kiro_crew.kiro_cli import resolve_kiro_cli
 from kiro_crew.security import (
     is_sensitive_path,
     redact_credentials,
@@ -276,9 +277,28 @@ def _macos_crash_reports() -> list[Path]:
 
 
 def _kiro_cli_version() -> str:
+    """Probe the installed Kiro CLI's ``--version`` output.
+
+    Resolves the binary through :func:`resolve_kiro_cli` — the same fixed-dir
+    + ``PATH`` search the gateway and ACP launch paths use — rather than
+    spawning the bare name ``kiro-cli``. A bare-name spawn only sees the
+    collector process's OWN inherited ``PATH``, which on a desktop app
+    launched from Finder/Dock is launchd's minimal environment, not the login
+    shell's. That made a genuinely-installed CLI report ``unavailable`` —
+    indistinguishable from "not installed" — even while the gateway was
+    successfully spawning it via the resolver. See
+    https://github.com/kirodotdev/KiroCrew/issues/7674.
+
+    ``unavailable`` is now reserved for the resolver genuinely finding
+    nothing; a resolved binary that fails to run reports distinctly so the
+    two cases are never collapsed onto the same triage-misleading string.
+    """
+    binary = resolve_kiro_cli()
+    if not binary:
+        return "unavailable"
     try:
         out = subprocess.run(
-            ["kiro-cli", "--version"],
+            [binary, "--version"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -286,7 +306,7 @@ def _kiro_cli_version() -> str:
         )
         return (out.stdout or out.stderr).strip() or "unknown"
     except (OSError, subprocess.SubprocessError):
-        return "unavailable"
+        return "present but not runnable"
 
 
 #: PEP 440 prerelease segment — see
