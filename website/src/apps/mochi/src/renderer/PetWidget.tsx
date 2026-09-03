@@ -33,7 +33,7 @@ import {
   resolvePetName,
 } from '../../builtinPacks'
 import { LottieRenderer } from './LottieRenderer'
-import { SpriteRenderer } from '../../../shared/SpriteRenderer'
+import { SpriteRenderer } from './SpriteRenderer'
 import { PetContextMenu } from './PetContextMenu'
 
 // ── Hardcoded SVG fallbacks for default-mochi built-in pack ────────────────
