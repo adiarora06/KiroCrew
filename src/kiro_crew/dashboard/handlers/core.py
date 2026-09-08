@@ -81,7 +81,9 @@ from kiro_crew.stt.limits import (
 from kiro_crew.transcribe import (
     _find_ffmpeg,
     _whisper_language,
+    audio_exceeds_secs,
     availability_detail,
+    batch_duration_cap_secs,
     ensure_ffmpeg_in_path,
     ffmpeg_source,
     is_available,
@@ -1332,6 +1334,18 @@ async def api_stt_transcribe(request: web.Request) -> web.Response:
         except part_stream.PartTooLarge:
             return web.json_response(
                 {"error": "audio too large", "code": _CODE_STT_AUDIO_TOO_LARGE}, status=413
+            )
+
+        duration_cap = batch_duration_cap_secs(cfg.stt)
+        if duration_cap is not None and await audio_exceeds_secs(
+            tmp, duration_cap, timeout_secs=cfg.stt.timeout_secs
+        ):
+            return web.json_response(
+                {
+                    "error": (f"audio exceeds the {duration_cap // 60}-minute transcription limit"),
+                    "code": "stt_audio_too_long",
+                },
+                status=422,
             )
 
         text = await transcribe_audio(tmp)
