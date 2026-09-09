@@ -1513,6 +1513,24 @@ class TestSttTranscribe:
         transcribe.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_unverified_duration_is_retryable_and_not_transcribed(self, monkeypatch) -> None:
+        monkeypatch.setattr(core_mod, "batch_duration_cap_secs", lambda _cfg: 3600)
+        monkeypatch.setattr(core_mod, "audio_exceeds_secs", AsyncMock(return_value=None))
+        transcribe = AsyncMock()
+        monkeypatch.setattr("kiro_crew.transcribe.transcribe_audio", transcribe)
+        field = SimpleNamespace(
+            name="audio",
+            filename="recording.webm",
+            read_chunk=AsyncMock(side_effect=[b"audio-bytes", b""]),
+        )
+
+        resp = await core_mod.api_stt_transcribe(_multipart_req(field))
+
+        assert resp.status == 503
+        assert json.loads(resp.body)["code"] == "stt_audio_duration_unverified"
+        transcribe.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_transcript_is_returned_and_redacted(self, monkeypatch) -> None:
         """A dictated credential must not come back in the response body: speech
         reaches this endpoint from a microphone, so nothing upstream of it has had
