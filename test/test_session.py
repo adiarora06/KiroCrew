@@ -2115,7 +2115,7 @@ class TestResetWithPid:
 
     @pytest.mark.asyncio
     async def test_reset_rescues_the_queue_instead_of_unlinking_its_temp_files(self, cfg, tmp_path):
-        """reset() no longer drops the queue outright -- it rescues it into
+        """reset() preserves the queue by rescuing it into
         ``_orphaned_queues`` (see TestResetPreservesQueuedMessages), so the
         temp file behind a queued image must survive the reset and is only
         unlinked once something actually drops that rescue."""
